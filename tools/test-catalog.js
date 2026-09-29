@@ -71,7 +71,7 @@ function mockContext() {
 const catIds = new Set(cat.categories.map((c) => c.id));
 check(cat.categories.length === 7, 'expected 7 categories');
 const typeIds = Object.keys(cat.types);
-check(typeIds.length === 45, 'expected 45 types, got ' + typeIds.length);
+check(typeIds.length === 46, 'expected 46 types, got ' + typeIds.length);
 typeIds.forEach((id) => {
   const t = cat.types[id];
   check(typeof t.name === 'string' && t.name.length > 1, id + ': name');
@@ -80,9 +80,19 @@ typeIds.forEach((id) => {
   check(/^#[0-9A-F]{6}$/i.test(t.color), id + ': colour');
   check(typeof t.elev === 'number', id + ': elev');
 });
-['kitchenSink', 'toilet', 'basin', 'shower', 'bathtub'].forEach((id) => check(cat.types[id].fixture === true, id + ' fixture'));
+['kitchenSink', 'toilet', 'basin', 'shower', 'bathtub', 'tanque'].forEach((id) => check(cat.types[id].fixture === true, id + ' fixture'));
 check(cat.types.rug.flat === true, 'rug flat');
 check(cat.types.upperCabinet.elev === 1500, 'upperCabinet elev');
+const tq = cat.types.tanque || {};
+check(tq.name === 'Tanque' && tq.category === 'cozinha' && tq.w === 600 && tq.d === 550 && tq.h === 900 && tq.color === '#D9D6CF', 'tanque type');
+{
+  // the tanque has its own symbol (bowl + ribbed washboard + tap), not the fallback box with a cross and a label
+  const ctx = mockContext();
+  let texts = 0;
+  ctx.fillText = () => texts++;
+  cat.draw2d(ctx, { type: 'tanque', w: 600, d: 550 }, { px: 2 });
+  check(texts === 0 && ctx.log.strokes >= 8, 'tanque must use a dedicated symbol');
+}
 check(Object.isFrozen(cat.types) && Object.isFrozen(cat.types.sofa3), 'types must be frozen');
 
 // ------------------------------------------------------------------ draw2d on every type and odd sizes

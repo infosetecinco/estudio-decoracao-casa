@@ -12,7 +12,9 @@
   const COLORS = {
     wall: '#EFEBE3',
     capStructural: '#2E2A26',
-    capPartition: '#BFB6A6',
+    capPartition: '#A99F8E', // + 45° hatch (2D: #CFC6B7 fill, #8C8375 hatch)
+    capHatch: '#6F675A',
+    coping: '#D9D2C6', // exposed tops that are not "cut": parapet, railing base
     muro: '#E7D3C0',
     muroCap: '#CFB9A2',
     sillStone: '#E2DCD1',
@@ -27,11 +29,11 @@
     roof: '#CDC7BC',
     coral: '#D9643A',
     sky: '#7FB0E0',
-    horizon: '#E6ECEE',
-    groundFar: '#D9D4CB',
+    horizon: '#DCE3E4', // also the fog colour: the ground dissolves into it before the world edge
     asphalt: '#3A3B3D',
     curb: '#BEB8AE',
-    neighbour: '#E9E4DB',
+    neighbour: '#CFCBC4', // context massing: cool pale clay, distinct from the warm-white house
+    neighbourRoof: '#B4ADA3',
     trunk: '#6B4F37',
     leaves: '#5E8A3A',
   };
@@ -41,22 +43,26 @@
     speed: 1400, // mm/s
     run: 2800, // mm/s
     stepUp: 350, // climb a surface at most this far above the feet
-    headClear: 1800, // a surface this far above the feet is overhead (walk under it)
+    headClear: 1800, // a surface / the underside of a stair part this far above the feet is overhead (walk under it)
     bodyTop: 1700, // body collision range: [feet + stepUp, feet + bodyTop]
     gravity: 9800, // mm/s²
     floorSnap: 60, // feet within this of a level → on that floor
     maxSubstep: 40, // mm per collision substep
   };
-  // Spawn points per floor (plan mm) and the direction the walker faces.
+  // Spawn points per floor (plan mm) and the direction the walker faces (always towards open space).
   const SPAWNS = {
-    f0: { x: 5500, y: 13900, dir: { x: 0, y: -1 } }, // Sala, inside the entrance
-    f1: { x: 4700, y: 9550, dir: { x: 1, y: 0 } }, // Circulação
-    f2: { x: 4700, y: 7400, dir: { x: 0, y: -1 } }, // Varanda coberta
+    f0: { x: 5500, y: 13900, dir: { x: 0, y: -1 } }, // Sala, inside the entrance, looking at the hall and stair
+    f1: { x: 5850, y: 9250, dir: { x: -1, y: 0 } }, // top of the stair, looking along the Circulação
+    f2: { x: 4400, y: 9950, dir: { x: 0, y: -1 } }, // arrival of the stair, looking across the área gourmet
   };
   const SLAB = 100; // mm, upper-floor slab under the finished floor
   const BASE_SLAB = 40; // mm, ground-floor base under the finished floor
   const ROOF_T = 120; // mm
-  const PARAPET_H = 450; // mm above the roof slab
+  const PARAPET_H = 1000; // mm above the roof slab (platibanda, corte transversal)
+  const RAILING_MURETA = 300; // mm, default solid base of a railing (wall.mureta overrides)
+  // Stair build-up (mm): stone tread + concrete tread body, inclined flight slab.
+  const STAIR_DROP = 150;
+  const STAIR_SLAB_MM = 120;
   const WALL_CENTRE_OFFSET = 75; // mm, room outline → wall centre line (150 mm walls)
   const FOV_ORBIT = 45;
   const FOV_WALK = 68;
@@ -98,21 +104,100 @@
     return { minX: 0, minY: 0, maxX: lot.w, maxY: lot.h };
   };
 
-  /** Pleasant aerial 3/4 view from the street side (+y) towards the centre of a floor. Metres. */
-  P.aerialPose = (doc, floorId) => {
-    const f = doc.floors.find((x) => x.id === floorId) || doc.floors[0];
-    const b = P.floorBounds(doc, f.id);
-    const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
-    const diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * MM;
-    const dist = P.clamp(diag * 1.95, 20, 80);
-    const polar = 56 * DEG, azim = 32 * DEG; // from vertical; from +Z towards +X
-    const target = { x: cx * MM, y: (f.level + 900) * MM, z: cy * MM };
-    const pos = {
-      x: target.x + dist * Math.sin(polar) * Math.sin(azim),
-      y: target.y + dist * Math.cos(polar),
-      z: target.z + dist * Math.sin(polar) * Math.cos(azim),
-    };
-    return { pos, target, up: { x: 0, y: 1, z: 0 } };
+  /**
+   * 3D box (mm) of what the aerial view shows: every built wall (structural, partition, railing — not the boundary
+   * muros, which wrap the whole lot) of the floors up to the active one (or all floors + the roof parapet), from
+   * the ground to the top of the highest of those walls.
+   */
+  P.houseBox = (doc, floorId, allFloors) => {
+    const idx = Math.max(0, doc.floors.findIndex((f) => f.id === floorId));
+    const last = allFloors ? doc.floors.length - 1 : idx;
+    const lv = floorLevels(doc);
+    const b = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, z0: 0, z1: 0 };
+    doc.walls.forEach((w) => {
+      const f = lv.get(w.floor);
+      if (!f || f.index > last || w.kind === 'muro') return;
+      const ht = (w.thick || 0) / 2;
+      b.minX = Math.min(b.minX, w.a.x - ht, w.b.x - ht);
+      b.maxX = Math.max(b.maxX, w.a.x + ht, w.b.x + ht);
+      b.minY = Math.min(b.minY, w.a.y - ht, w.b.y - ht);
+      b.maxY = Math.max(b.maxY, w.a.y + ht, w.b.y + ht);
+      b.z1 = Math.max(b.z1, f.level + (w.height || 0));
+    });
+    if (!isFinite(b.minX)) {
+      const fb = P.floorBounds(doc, floorId);
+      const f = doc.floors[idx] || { level: 0, height: 2880 };
+      return { minX: fb.minX, minY: fb.minY, maxX: fb.maxX, maxY: fb.maxY, z0: 0, z1: f.level + f.height };
+    }
+    if (allFloors && last === doc.floors.length - 1) {
+      const top = doc.floors[last];
+      b.z1 = Math.max(b.z1, top.level + top.height + ROOF_T + PARAPET_H);
+    }
+    return b;
+  };
+
+  const AERIAL = { polar: 57 * DEG, azim: 33 * DEG, fill: 0.8, minDist: 8, maxDist: 90 };
+  /**
+   * Pleasant aerial 3/4 view from the street side (+y) that fits the house box of the active floor to a viewport of
+   * the given aspect (both fovs): the house fills `AERIAL.fill` of the limiting dimension and is centred on screen.
+   * opts: { aspect = 1.5, fov = FOV_ORBIT, allFloors = false }. Metres.
+   */
+  P.aerialPose = (doc, floorId, opts) => {
+    const o = opts || {};
+    const aspect = o.aspect > 0 ? o.aspect : 1.5;
+    const tanV = Math.tan(((o.fov || FOV_ORBIT) * DEG) / 2), tanH = tanV * aspect;
+    const box = P.houseBox(doc, floorId, !!o.allFloors);
+    const v = { x: Math.sin(AERIAL.polar) * Math.sin(AERIAL.azim), y: Math.cos(AERIAL.polar), z: Math.sin(AERIAL.polar) * Math.cos(AERIAL.azim) };
+    const f = { x: -v.x, y: -v.y, z: -v.z }; // forward
+    const rl = Math.hypot(f.z, f.x);
+    const r = { x: -f.z / rl, y: 0, z: f.x / rl }; // right = forward × up
+    const u = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
+    const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+    const corners = [];
+    [box.minX, box.maxX].forEach((x) => [box.minY, box.maxY].forEach((y) => [box.z0, box.z1].forEach((z) => corners.push({ x: x * MM, y: z * MM, z: y * MM }))));
+    let t = { x: ((box.minX + box.maxX) / 2) * MM, y: ((box.z0 + box.z1) / 2) * MM, z: ((box.minY + box.maxY) / 2) * MM };
+    let dist = 20;
+    for (let it = 0; it < 6; it++) {
+      const rel = corners.map((c) => {
+        const q = { x: c.x - t.x, y: c.y - t.y, z: c.z - t.z };
+        return { a: dot(q, r), b: dot(q, u), c: dot(q, f) };
+      });
+      dist = rel.reduce((d, q) => Math.max(d, Math.abs(q.a) / (AERIAL.fill * tanH) - q.c, Math.abs(q.b) / (AERIAL.fill * tanV) - q.c), 1);
+      const nx = rel.map((q) => q.a / ((dist + q.c) * tanH)), ny = rel.map((q) => q.b / ((dist + q.c) * tanV));
+      const mx = (Math.min.apply(null, nx) + Math.max.apply(null, nx)) / 2;
+      const my = (Math.min.apply(null, ny) + Math.max.apply(null, ny)) / 2;
+      if (Math.abs(mx) < 1e-4 && Math.abs(my) < 1e-4) break;
+      const sx = mx * tanH * dist, sy = my * tanV * dist; // re-centre the projected box
+      t = { x: t.x + r.x * sx + u.x * sy, y: t.y + r.y * sx + u.y * sy, z: t.z + r.z * sx + u.z * sy };
+    }
+    dist = P.clamp(dist, AERIAL.minDist, AERIAL.maxDist);
+    const pos = { x: t.x + dist * v.x, y: t.y + dist * v.y, z: t.z + dist * v.z };
+    return { pos, target: t, up: { x: 0, y: 1, z: 0 } };
+  };
+  /** NDC extents {minX,maxX,minY,maxY} of the house box seen from a pose (for tests / diagnostics). */
+  P.boxNdc = (box, pose, aspect, fovDeg) => {
+    const tanV = Math.tan(((fovDeg || FOV_ORBIT) * DEG) / 2), tanH = tanV * aspect;
+    const f0 = { x: pose.target.x - pose.pos.x, y: pose.target.y - pose.pos.y, z: pose.target.z - pose.pos.z };
+    const fl = Math.hypot(f0.x, f0.y, f0.z);
+    const f = { x: f0.x / fl, y: f0.y / fl, z: f0.z / fl };
+    const rl = Math.hypot(f.z, f.x);
+    const r = { x: -f.z / rl, y: 0, z: f.x / rl };
+    const u = { x: r.y * f.z - r.z * f.y, y: r.z * f.x - r.x * f.z, z: r.x * f.y - r.y * f.x };
+    const out = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+    [box.minX, box.maxX].forEach((x) =>
+      [box.minY, box.maxY].forEach((y) =>
+        [box.z0, box.z1].forEach((z) => {
+          const q = { x: x * MM - pose.pos.x, y: z * MM - pose.pos.y, z: y * MM - pose.pos.z };
+          const d = q.x * f.x + q.y * f.y + q.z * f.z;
+          const nx = (q.x * r.x + q.y * r.y + q.z * r.z) / (d * tanH), ny = (q.x * u.x + q.y * u.y + q.z * u.z) / (d * tanV);
+          out.minX = Math.min(out.minX, nx);
+          out.maxX = Math.max(out.maxX, nx);
+          out.minY = Math.min(out.minY, ny);
+          out.maxY = Math.max(out.maxY, ny);
+        })
+      )
+    );
+    return out;
   };
 
   // ------------------------------------------------------------------ interval & rectilinear polygon helpers
@@ -261,6 +346,58 @@
     });
   }
 
+  // ------------------------------------------------------------------ openings that run past the wall top
+  const isBodyWall = (w) => w.kind === 'structural' || w.kind === 'partition';
+  const contCache = { walls: null, openings: null, floors: null, list: [] };
+  /**
+   * Openings taller than their wall (e.g. the stair windows J5 1,20×1,60 at sill 2,20 in a 2,88 m wall) continue
+   * into the collinear wall of the floor above — as in the cortes, where they span the double-height stairwell.
+   * → [{ opId, lowerWall, lowerFloor, upperWall, floor, t, width, height, cut:{x0,y0,x1,y1} }] (mm; t/width on the
+   * upper wall, height = part above the upper floor level, cut = plan band of the lower wall to clear in the slab).
+   * Cached per document identity.
+   */
+  P.windowContinuations = (doc) => {
+    if (contCache.walls === doc.walls && contCache.openings === doc.openings && contCache.floors === doc.floors) return contCache.list;
+    const lv = floorLevels(doc);
+    const byId = new Map(doc.walls.map((w) => [w.id, w]));
+    const list = [];
+    doc.openings.forEach((op) => {
+      const w = byId.get(op.wall);
+      const fl = w && lv.get(w.floor);
+      if (!fl || !isBodyWall(w) || fl.index + 1 >= doc.floors.length) return;
+      const top = (op.sill || 0) + op.height;
+      if (top <= w.height + 60) return;
+      const fu = doc.floors[fl.index + 1];
+      const over = fl.level + top - fu.level;
+      if (over < 60) return;
+      const fr = DD.geom.openingFrame(w, op);
+      doc.walls.some((u) => {
+        if (u.floor !== fu.id || !isBodyWall(u)) return false;
+        const { d, L } = DD.geom.wallDir(u);
+        if (L < 1 || Math.abs(d.x * fr.d.y - d.y * fr.d.x) > 1e-3) return false; // parallel
+        const off = Math.abs((fr.c.x - u.a.x) * -d.y + (fr.c.y - u.a.y) * d.x);
+        if (off > Math.max(u.thick, w.thick) / 2 + 1) return false; // collinear (within the thickness)
+        const ta = (fr.start.x - u.a.x) * d.x + (fr.start.y - u.a.y) * d.y, tb = (fr.end.x - u.a.x) * d.x + (fr.end.y - u.a.y) * d.y;
+        const lo = P.clamp(Math.min(ta, tb), 0, L), hi = P.clamp(Math.max(ta, tb), 0, L);
+        if (hi - lo < 60) return false;
+        // slab band to clear: the wall thickness, 25 mm wider than the opening on each side so the slab's end
+        // faces sit inside the solid wall instead of coinciding with the window reveal (z-fighting)
+        const ht = w.thick / 2, n = fr.n, dd = fr.d, e = 25;
+        const sa = { x: fr.start.x - dd.x * e, y: fr.start.y - dd.y * e }, sb = { x: fr.end.x + dd.x * e, y: fr.end.y + dd.y * e };
+        const xs = [sa.x + n.x * ht, sa.x - n.x * ht, sb.x + n.x * ht, sb.x - n.x * ht];
+        const ys = [sa.y + n.y * ht, sa.y - n.y * ht, sb.y + n.y * ht, sb.y - n.y * ht];
+        list.push({
+          opId: op.id, code: op.code, lowerWall: w.id, lowerFloor: w.floor, upperWall: u.id, floor: u.floor,
+          t: (lo + hi) / 2, width: hi - lo, height: Math.min(over, u.height),
+          cut: { x0: Math.min.apply(null, xs), y0: Math.min.apply(null, ys), x1: Math.max.apply(null, xs), y1: Math.max.apply(null, ys) },
+        });
+        return true;
+      });
+    });
+    Object.assign(contCache, { walls: doc.walls, openings: doc.openings, floors: doc.floors, list });
+    return list;
+  };
+
   // ------------------------------------------------------------------ walk: colliders, surfaces, stepping
   function isFlatType(type) {
     const t = DD.catalog && DD.catalog.types && DD.catalog.types[type];
@@ -386,15 +523,64 @@
     return out;
   };
 
-  /** Step-up rule: highest surface within reach; anything between reach and head height blocks. */
-  P.chooseSurface = (surfaces, feet) => {
+  /**
+   * Inclined flight slabs of a U-stair (mm, relative to the stair's floor level), shared by the 3D model and the
+   * walker. Each: {x0, x1 (plan x range), y0, y1 (row), top(x) (slab top line), thick (vertical thickness)}.
+   * Lower slab: top line through the back-bottom corners of the lower treads, from the ground to the landing's
+   * underside. Upper slab: through the back-bottom corners of the upper treads, from the landing to the stair start.
+   */
+  P.stairSlabs = (st, g) => {
+    const T = st.tread, hw = st.width / 2;
+    const k = g.riser / T;
+    const land = g.landing[0];
+    const landX = land.x0, landZ = land.z;
+    const end = st.x + st.length;
+    const thick = STAIR_SLAB_MM * Math.sqrt(1 + k * k);
+    const lowerTop = (xx) => (xx - st.x) * k - STAIR_DROP;
+    const upperTop = (xx) => (landX - xx) * k + landZ - STAIR_DROP;
+    return [
+      { flight: 0, x0: st.x + STAIR_DROP / k, x1: Math.min(end, st.x + landZ / k), y0: st.y + hw, y1: st.y + st.width, top: lowerTop, thick },
+      { flight: 1, x0: st.x, x1: landX, y0: st.y, y1: st.y + hw, top: upperTop, thick },
+    ];
+  };
+  /** Undersides (mm above the stair's floor) of every stair part above plan point (x, y): treads, landing, slabs. */
+  P.stairUndersidesAt = (st, floorHeight, x, y) => {
+    const f = { x0: st.x, y0: st.y, x1: st.x + st.length, y1: st.y + st.width };
+    if (x < f.x0 || x > f.x1 || y < f.y0 || y > f.y1) return [];
+    const g = DD.geom.stairGeometry(st, floorHeight);
+    const out = [];
+    g.treads.concat(g.landing).forEach((t) => {
+      if (x >= t.x0 && x <= t.x1 && y >= t.y0 && y <= t.y1) out.push(t.z - STAIR_DROP);
+    });
+    P.stairSlabs(st, g).forEach((s) => {
+      if (x >= s.x0 && x <= s.x1 && y >= s.y0 && y <= s.y1) out.push(s.top(x) - s.thick);
+    });
+    return out;
+  };
+  /** Absolute undersides (mm) of the stair structure above plan point (x, y). */
+  P.ceilingsAt = (ctx, x, y) => {
+    const out = [];
+    ctx.stairs.forEach((s) => P.stairUndersidesAt(s.st, s.height, x, y).forEach((c) => out.push(s.level + c)));
+    return out;
+  };
+
+  /**
+   * Step-up rule: highest surface within reach; anything between reach and head height blocks. `ceilings` (optional,
+   * absolute mm): undersides of overhead structure — the head (plus a margin, WALK.headClear) must pass below them.
+   */
+  P.chooseSurface = (surfaces, feet, ceilings) => {
     let z = -Infinity, blocked = false;
     surfaces.forEach((s) => {
       if (s <= feet + WALK.stepUp) z = Math.max(z, s);
       else if (s < feet + WALK.headClear) blocked = true;
     });
-    return { z: isFinite(z) ? z : 0, blocked };
+    const zz = isFinite(z) ? z : 0;
+    if (ceilings) ceilings.forEach((c) => {
+      if (c > zz + 1 && c < zz + WALK.headClear) blocked = true;
+    });
+    return { z: zz, blocked };
   };
+  const chooseAt = (ctx, x, y, feet) => P.chooseSurface(P.surfacesAt(ctx, x, y), feet, P.ceilingsAt(ctx, x, y));
 
   /** Index of the floor the feet stand on. */
   P.floorIndexAt = (floors, feet) => {
@@ -434,16 +620,16 @@
       x = moved.x;
       y = moved.y;
     }
-    const target = P.chooseSurface(P.surfacesAt(world.ctx, x, y), feet0).z;
+    const target = chooseAt(world.ctx, x, y, feet0).z;
     const v = settleFeet(feet0, state.vz || 0, target, dt);
     return { x, y, feet: v.feet, vz: v.vz, floorIndex: P.floorIndexAt(world.floors, v.feet) };
   };
   function tryMove(nx, ny, feet, world) {
-    const s = P.chooseSurface(P.surfacesAt(world.ctx, nx, ny), feet);
+    const s = chooseAt(world.ctx, nx, ny, feet);
     if (s.blocked) return null;
     const body = P.bodyColliders(world.colliders, Math.max(feet, s.z));
     const res = P.resolveCircle(nx, ny, WALK.radius, body);
-    if (res.hit && P.chooseSurface(P.surfacesAt(world.ctx, res.x, res.y), feet).blocked) return null;
+    if (res.hit && chooseAt(world.ctx, res.x, res.y, feet).blocked) return null;
     return { x: res.x, y: res.y };
   }
   /** Ease onto steps and small drops; fall with gravity from larger heights. */
@@ -501,8 +687,12 @@
     site: null,
     floors: new Map(), // floorId → { root, arch, furn, roof, sig, anim, shown }
     furniture: new Map(), // itemId → { obj, item, key, floor }
-    index: { walls: new Map(), openings: new Map(), rooms: new Map() },
-    dirty: { floors: new Set(), furniture: true, site: true, visibility: true, colliders: true, highlight: true },
+    index: { walls: new Map(), openings: new Map(), openingParts: new Map(), rooms: new Map() },
+    dirty: { floors: new Set(), furniture: true, site: true, visibility: true, colliders: true, highlight: true, transient: false },
+    surfDue: 0, // time of a throttled room-floor refresh during a wall drag
+    cutaway: false, // during 2D↔3D transitions only floors up to the active one are shown, no roof
+    atHome: false, // the orbit camera sits on the automatic home framing (re-fit on resize until the user moves it)
+    warm: false, // shader programs / GPU buffers pre-compiled
     res: { mats: new Map(), textures: new Map(), tinted: new Map(), geos: new Map() },
     highlighted: [], // [{ mesh, material }] originals to restore
     outline: null, // selection box around furniture
@@ -543,8 +733,11 @@
   }
   const MAT = {
     wall: () => stdMat(COLORS.wall, { roughness: 0.93 }),
-    capStructural: () => stdMat(COLORS.capStructural, { roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }),
-    capPartition: () => stdMat(COLORS.capPartition, { roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }),
+    // Caps are the true top faces of the wall boxes: no polygon offset (it made them bleed through the faces of
+    // the wall / parapet stacked on top as dark seams at grazing angles).
+    capStructural: () => stdMat(COLORS.capStructural, { roughness: 0.8 }),
+    capPartition: () => hatchMaterial(),
+    coping: () => stdMat(COLORS.coping, { roughness: 0.7 }),
     muro: () => stdMat(COLORS.muro, { roughness: 0.95 }),
     muroCap: () => stdMat(COLORS.muroCap, { roughness: 0.8 }),
     sill: () => stdMat(COLORS.sillStone, { roughness: 0.45 }),
@@ -554,12 +747,14 @@
     glass: () =>
       stdMat(COLORS.glass, { roughness: 0.04, metalness: 0.1, transparent: true, opacity: 0.26, depthWrite: false, side: S.THREE.DoubleSide }),
     slab: () => stdMat(COLORS.slab, { roughness: 0.9 }),
-    ceiling: () => stdMat(COLORS.ceiling, { roughness: 0.95 }),
+    // white plaster; a little self-light stands in for the interior bounce the renderer does not compute
+    ceiling: () => stdMat(COLORS.ceiling, { roughness: 0.95, emissive: COLORS.ceiling, emissiveIntensity: 0.16 }),
     stone: () => stdMat(COLORS.stairStone, { roughness: 0.5 }),
     stairBody: () => stdMat(COLORS.stairBody, { roughness: 0.9 }),
     roof: () => stdMat(COLORS.roof, { roughness: 0.95 }),
     curb: () => stdMat(COLORS.curb, { roughness: 0.9 }),
     neighbour: () => stdMat(COLORS.neighbour, { roughness: 1 }),
+    neighbourRoof: () => stdMat(COLORS.neighbourRoof, { roughness: 1, flatShading: true }),
     trunk: () => stdMat(COLORS.trunk, { roughness: 0.9 }),
     leaves: () => stdMat(COLORS.leaves, { roughness: 0.9, flatShading: true }),
     white: () => stdMat('#F4F2EE', { roughness: 0.6 }),
@@ -609,6 +804,36 @@
         polygonOffsetUnits: -4,
       });
       m.name = 'v3d:floor:' + id;
+      return m;
+    });
+  }
+  /**
+   * Partition cap: sand fill with a 45° ink hatch (as the 2D partition poché), so non-structural walls read
+   * differently from the dark structural cut and from the white wall faces. uv = wall-local metres.
+   */
+  function hatchMaterial() {
+    return cached(S.res.mats, 'capPartition', () => {
+      const T = S.THREE;
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = COLORS.capPartition;
+      ctx.fillRect(0, 0, 64, 64);
+      ctx.strokeStyle = COLORS.capHatch;
+      ctx.lineWidth = 7;
+      [-64, 0, 64].forEach((o) => {
+        ctx.beginPath();
+        ctx.moveTo(o, 64);
+        ctx.lineTo(o + 64, 0);
+        ctx.stroke();
+      });
+      const tex = new T.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = T.RepeatWrapping;
+      tex.repeat.set(12, 12); // one hatch line every ~60 mm
+      tex.colorSpace = T.SRGBColorSpace;
+      tex.anisotropy = S.renderer.capabilities.getMaxAnisotropy();
+      const m = new T.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0 });
+      m.name = 'v3d:capPartition';
       return m;
     });
   }
@@ -754,14 +979,27 @@
     g.rotation.y = Math.atan2(-d.y, d.x);
     if (w.kind === 'railing') buildRailing(g, w, L);
     else {
+      const conts = P.windowContinuations(doc);
       const ops = DD.geom.openingsOfWall(doc, w.id);
-      buildWallBody(g, w, ops);
+      const lowerOf = new Set(conts.filter((c) => c.lowerWall === w.id).map((c) => c.opId));
+      // the upper part of a window that starts on the floor below: a hole from the floor up to its head
+      const upper = conts
+        .filter((c) => c.upperWall === w.id)
+        .map((c) => ({ id: 'cont:' + c.opId, wall: w.id, code: c.code, type: 'window', t: c.t, width: c.width, sill: 0, height: c.height, style: 'contUpper', side: 1, hinge: 'start', of: c.opId }));
+      buildWallBody(g, w, ops.concat(upper));
       ops.forEach((op) => {
-        const o = buildOpening(doc, w, op, L);
+        const o = buildOpening(doc, w, op, L, lowerOf.has(op.id) ? 'fixed' : null);
         if (o) {
           g.add(o);
           S.index.openings.set(op.id, o);
         }
+      });
+      upper.forEach((op) => {
+        const o = buildOpening(doc, w, op, L, null);
+        if (!o) return;
+        tagTree(o, { openingId: op.of });
+        g.add(o);
+        S.index.openingParts.set(op.of, o);
       });
     }
     tagTree(g, { wallId: w.id });
@@ -785,22 +1023,40 @@
     g.add(mesh(boxesGeometry(boxes), wallMaterials(w.kind)));
   }
 
-  /** Guarda-corpo: 300 mm mureta + black metal balusters every ~110 mm + top rail at the wall height. */
+  /** Solid base of a railing (mm): wall.mureta, absent → 300; never above the railing height. */
+  P.muretaOf = (w) => P.clamp(w.mureta != null && isFinite(w.mureta) ? w.mureta : RAILING_MURETA, 0, Math.max(0, w.height || 0));
+
+  /**
+   * Guarda-corpo: solid mureta (wall.mureta; plastered, stone coping) + black metal balusters every ~110 mm between
+   * a bottom and a top rail at the wall height. Without mureta (stair-void guard) it is a slim steel guard.
+   */
   function buildRailing(g, w, L) {
     const T = S.THREE;
     const len = L * MM, H = w.height * MM, ht = (w.thick / 2) * MM;
-    const mur = Math.min(0.3, H * 0.5);
-    g.add(mesh(boxesGeometry([{ x0: 0, x1: len, y0: 0, y1: mur, z0: -ht, z1: ht, mat: 0, top: 1, noBottom: true }]), [MAT.wall(), MAT.capPartition()]));
-    g.add(mesh(boxesGeometry([{ x0: 0.02, x1: len - 0.02, y0: H - 0.04, y1: H, z0: -0.028, z1: 0.028 }]), [MAT.metal()]));
+    const mur = P.muretaOf(w) * MM;
+    const rw = Math.min(0.028, ht * 0.8 + 0.004); // half width of the rails
+    const railBoxes = [{ x0: 0.02, x1: len - 0.02, y0: H - 0.04, y1: H, z0: -rw, z1: rw }];
+    if (mur > 0.005) {
+      const cope = 0.03;
+      g.add(mesh(boxesGeometry([
+        { x0: 0, x1: len, y0: 0, y1: Math.max(0.001, mur - cope), z0: -ht, z1: ht, mat: 0, noBottom: true },
+        { x0: 0, x1: len, y0: Math.max(0.001, mur - cope), y1: mur, z0: -ht - 0.012, z1: ht + 0.012, mat: 1 },
+      ]), [MAT.wall(), MAT.coping()]));
+    } else {
+      railBoxes.push({ x0: 0.02, x1: len - 0.02, y0: 0.06, y1: 0.09, z0: -rw, z1: rw }); // bottom rail
+      [0.01, len - 0.05].forEach((px) => railBoxes.push({ x0: px, x1: px + 0.04, y0: 0, y1: H, z0: -rw, z1: rw })); // end posts
+    }
+    g.add(mesh(boxesGeometry(railBoxes), [MAT.metal()]));
     const step = 0.11;
     const n = Math.max(0, Math.floor((len - 0.08) / step));
-    if (!n) return;
+    const y0 = mur > 0.005 ? mur : 0.09;
+    const h = H - 0.04 - y0;
+    if (!n || h < 0.02) return;
     const geo = sharedGeo('baluster', () => new T.BoxGeometry(0.018, 1, 0.018));
     const inst = new T.InstancedMesh(geo, MAT.metal(), n);
-    const h = H - 0.04 - mur;
     const x0 = (len - (n - 1) * step) / 2;
     const m4 = new T.Matrix4();
-    for (let i = 0; i < n; i++) inst.setMatrixAt(i, m4.makeScale(1, h, 1).setPosition(x0 + i * step, mur + h / 2, 0));
+    for (let i = 0; i < n; i++) inst.setMatrixAt(i, m4.makeScale(1, h, 1).setPosition(x0 + i * step, y0 + h / 2, 0));
     inst.castShadow = true;
     inst.receiveShadow = false;
     g.add(inst);
@@ -821,7 +1077,8 @@
     return op.side === -1 ? -1 : 1;
   }
 
-  function buildOpening(doc, w, op, L) {
+  /** `styleOverride` 'fixed' = lower part of a window that continues on the floor above (fixed pane + transom). */
+  function buildOpening(doc, w, op, L, styleOverride) {
     const H = w.height;
     const t0 = P.clamp(op.t - op.width / 2, 0, L), t1 = P.clamp(op.t + op.width / 2, 0, L);
     const sill = P.clamp(op.sill || 0, 0, H), top = P.clamp((op.sill || 0) + op.height, 0, H);
@@ -839,7 +1096,8 @@
     };
     const g = new S.THREE.Group();
     g.name = 'opening:' + op.id;
-    const build = OPENING_BUILDERS[op.style] || (op.type === 'door' ? OPENING_BUILDERS.swing : OPENING_BUILDERS.fixed);
+    const style = styleOverride || op.style;
+    const build = OPENING_BUILDERS[style] || (op.type === 'door' ? OPENING_BUILDERS.swing : OPENING_BUILDERS.fixed);
     build(g, o);
     tagTree(g, { openingId: op.id });
     return g;
@@ -1026,6 +1284,13 @@
     const i = innerOf(o);
     g.add(placed(sashMesh(i.w, i.h - FW * 0.6, 0.035), i.x0, o.y0 + FW * 0.6, 0));
   }
+  /** Upper part of a window continuing from the floor below: jambs + head (no sill) and a top-hung sash. */
+  function buildContUpper(g, o) {
+    addFrame(g, o, false);
+    const i = innerOf(o);
+    const top = o.y1 - FW;
+    addMaxar(g, o, i.x0, i.w, top, top - o.y0 - 0.004);
+  }
   const OPENING_BUILDERS = {
     swing: buildSwing,
     double: buildDouble,
@@ -1038,6 +1303,7 @@
     fixedMaxar: buildFixedMaxar,
     pivot: buildPivot,
     fixed: buildFixed,
+    contUpper: buildContUpper,
   };
 
   // ================================================================== floors, slabs, stairs, roof
@@ -1071,8 +1337,8 @@
 
   // ------------------------------------------------------------------ stairs (floating treads + inclined slabs)
   const TREAD_STONE = 0.04;
-  const TREAD_BODY = 0.11;
-  const STAIR_SLAB = 0.12;
+  const TREAD_BODY = STAIR_DROP * MM - TREAD_STONE;
+  const STAIR_SLAB = STAIR_SLAB_MM * MM;
 
   function buildStair(group, st, floor) {
     const g = DD.geom.stairGeometry(st, floor.height);
@@ -1106,40 +1372,40 @@
     m.rotation.z = ang;
     return m;
   }
+  /** The two inclined flight slabs (shared line definitions with the walker: P.stairSlabs). */
   function stairSlabs(st, g, lvl) {
-    const r = g.riser * MM, T = st.tread * MM, x = st.x * MM;
-    const hw = (st.width / 2) * MM, y = st.y * MM;
-    const drop = TREAD_STONE + TREAD_BODY;
-    const k = r / T;
-    const n = st.lowerCount, u = st.upperCount;
-    // lower flight (far row, rising +x): top line through the back-bottom corners of the treads
-    const la = Math.max(0, drop / k);
-    const lowerEnd = x + n * T + T * 0.5;
-    const lower = inclinedBox(x + la, lvl, lowerEnd, lvl + (lowerEnd - x) * k - drop, y + hw, y + 2 * hw, STAIR_SLAB, MAT.stairBody());
-    // upper flight (near row, rising −x)
-    const zAt = (xx) => lvl + (n + u + 1) * r - (xx - x) * k - drop;
-    const upperStart = x + u * T + T * 0.5;
-    const upper = inclinedBox(upperStart, zAt(upperStart), x, zAt(x), y, y + hw, STAIR_SLAB, MAT.stairBody());
-    return [lower, upper];
+    return P.stairSlabs(st, g).map((s) =>
+      inclinedBox(s.x0 * MM, lvl + s.top(s.x0) * MM, s.x1 * MM, lvl + s.top(s.x1) * MM, s.y0 * MM, s.y1 * MM, STAIR_SLAB, MAT.stairBody())
+    );
   }
-  /** Black metal handrails on the open edges: outer edge of the lower flight, inner edge of the upper flight. */
+  /**
+   * Black metal handrails 0,90 m above the nosings on the open edges: outer edge of the lower flight and of the
+   * landing, inner edge of the upper flight. Works for any lowerCount/upperCount (landing = one full-width rect).
+   */
   function stairRails(st, g, lvl) {
     const r = g.riser * MM, T = st.tread * MM, x = st.x * MM, y = st.y * MM, W = st.width * MM;
-    const k = r / T, hRail = 0.9, n = st.lowerCount, u = st.upperCount;
-    const lowerTop = (xx) => lvl + (xx - x) * k + r;
-    const upperTop = (xx) => lvl + (n + u + 2) * r - (xx - x) * k;
-    const x1 = x + n * T, x2 = x + u * T;
+    const k = r / T, hRail = 0.9;
+    const land = g.landing[0];
+    const landX = land.x0 * MM, landZ = lvl + land.z * MM, endX = land.x1 * MM;
+    const lowerTop = (xx) => lvl + (xx - x) * k + r; // nosing line of the lower flight
+    const upperTop = (xx) => landZ + r + (landX - xx) * k; // nosing line of the upper flight
+    const zo0 = y + W - 0.05, zo1 = y + W - 0.01; // outer edge (far row)
+    const zi0 = y + W / 2 - 0.02, zi1 = y + W / 2 + 0.02; // inner edge (between the rows)
     const out = [
-      inclinedBox(x, lowerTop(x) + hRail, x1, lowerTop(x1) + hRail, y + W - 0.05, y + W - 0.01, 0.04, MAT.metal()),
-      inclinedBox(x2, upperTop(x2) + hRail, x, upperTop(x) + hRail, y + W / 2 - 0.02, y + W / 2 + 0.02, 0.04, MAT.metal()),
+      inclinedBox(x, lowerTop(x) + hRail, landX, lowerTop(landX) + hRail, zo0, zo1, 0.04, MAT.metal()),
+      inclinedBox(landX, upperTop(landX) + hRail, x, upperTop(x) + hRail, zi0, zi1, 0.04, MAT.metal()),
     ];
-    const posts = [];
-    for (let i = 0; i <= n; i += 2) {
-      const px = Math.min(x + i * T + T * 0.5, x1 - 0.03);
+    const posts = [{ x0: landX, x1: endX - 0.02, y0: landZ + hRail - 0.04, y1: landZ + hRail, z0: zo0, z1: zo1 }]; // landing rail
+    const nLow = g.treads.filter((t) => t.flight === 0).length, nUp = g.treads.filter((t) => t.flight === 1).length;
+    for (let i = 0; i <= nLow; i += 2) {
+      const px = Math.min(x + i * T + T * 0.5, landX - 0.03);
       posts.push({ x0: px - 0.012, x1: px + 0.012, y0: lowerTop(px) - r, y1: lowerTop(px) + hRail, z0: y + W - 0.042, z1: y + W - 0.018 });
     }
-    for (let j = 0; j <= u; j += 2) {
-      const px = Math.max(x + (u - j) * T - T * 0.5, x + 0.03);
+    for (let px = landX + 0.25; px < endX - 0.05; px += 0.27) {
+      posts.push({ x0: px - 0.012, x1: px + 0.012, y0: landZ, y1: landZ + hRail, z0: y + W - 0.042, z1: y + W - 0.018 });
+    }
+    for (let j = 0; j <= nUp; j += 2) {
+      const px = Math.max(landX - j * T - T * 0.5, x + 0.03);
       posts.push({ x0: px - 0.012, x1: px + 0.012, y0: upperTop(px) - r, y1: upperTop(px) + hRail, z0: y + W / 2 - 0.012, z1: y + W / 2 + 0.012 });
     }
     out.push(mesh(boxesGeometry(posts), [MAT.metal()]));
@@ -1164,30 +1430,47 @@
       const az = Math.min(s.a.y, s.b.y) * MM, bz = Math.max(s.a.y, s.b.y) * MM;
       const horizontal = Math.abs(s.a.y - s.b.y) < 1e-6;
       return horizontal
-        ? { x0: ax - half, x1: bx + half, y0: y0, y1: top, z0: az - half, z1: az + half, mat: 0, top: 1 }
-        : { x0: ax - half, x1: ax + half, y0: y0, y1: top, z0: az - half, z1: bz + half, mat: 0, top: 1 };
+        ? { x0: ax - half, x1: bx + half, y0: y0, y1: top, z0: az - half, z1: az + half, mat: 0, top: 1, noBottom: true }
+        : { x0: ax - half, x1: ax + half, y0: y0, y1: top, z0: az - half, z1: bz + half, mat: 0, top: 1, noBottom: true };
     });
-    g.add(mesh(boxesGeometry(parapet), [MAT.wall(), MAT.capStructural()]));
+    g.add(mesh(boxesGeometry(parapet), [MAT.wall(), MAT.coping()])); // platibanda with a light stone coping
     tagTree(g, { occluder: true });
     return g;
   }
 
-  /** Everything built from walls/rooms/stairs for one floor. */
+  /** Room floors + structural slab of one floor (rebuilt separately from the walls during wall drags). */
+  function buildFloorSurfaces(doc, floor, index) {
+    const g = new S.THREE.Group();
+    g.name = 'surfaces:' + floor.id;
+    const holes = index > 0 ? DD.geom.stairHoles(doc, floor.id) : [];
+    const cuts = P.windowContinuations(doc).filter((c) => c.floor === floor.id).map((c) => c.cut);
+    buildRoomFloors(g, doc, floor, holes);
+    buildSlab(g, doc, floor, holes.concat(cuts), index > 0 ? SLAB : BASE_SLAB);
+    return g;
+  }
+  function addWallGroup(arch, doc, w, floor) {
+    const wg = buildWall(doc, w, floor);
+    arch.userData.walls.add(wg);
+    S.index.walls.set(w.id, wg);
+    return wg;
+  }
+  /** Everything built from walls/rooms/stairs for one floor: { surfaces, walls, stairs } sub-groups. */
   function buildFloorArch(doc, floor, index) {
     const T = S.THREE;
     const arch = new T.Group();
     arch.name = 'arch:' + floor.id;
-    const holes = index > 0 ? DD.geom.stairHoles(doc, floor.id) : [];
-    buildRoomFloors(arch, doc, floor, holes);
-    buildSlab(arch, doc, floor, holes, index > 0 ? SLAB : BASE_SLAB);
+    const walls = new T.Group();
+    walls.name = 'walls:' + floor.id;
+    const stairs = new T.Group();
+    stairs.name = 'stairs:' + floor.id;
+    arch.userData.surfaces = buildFloorSurfaces(doc, floor, index);
+    arch.userData.walls = walls;
+    arch.add(arch.userData.surfaces, walls, stairs);
     doc.walls.forEach((w) => {
-      if (w.floor !== floor.id) return;
-      const wg = buildWall(doc, w, floor);
-      arch.add(wg);
-      S.index.walls.set(w.id, wg);
+      if (w.floor === floor.id) addWallGroup(arch, doc, w, floor);
     });
     doc.stairs.forEach((st) => {
-      if (st.floor === floor.id) buildStair(arch, st, floor);
+      if (st.floor === floor.id) buildStair(stairs, st, floor);
     });
     return arch;
   }
@@ -1195,7 +1478,8 @@
   // ================================================================== site: ground, street, neighbours, sky
   const GROUND_Y = -0.02;
   const ZONE_Y = -0.01;
-  const WORLD_HALF = 160; // m
+  const WORLD_HALF = 400; // m — far beyond the fog: the edge of the world is never seen
+  const FOG = { near: 45, far: 190, max: 360 }; // m; near/far follow the orbit distance (see updateFog)
   const SIDEWALK = 2.5; // m
   const STREET = 9; // m
   const ZONE_MATERIAL = { paving: 'calcada', driveway: 'intertravado', grass: 'grama' };
@@ -1250,14 +1534,129 @@
     g.add(mesh(boxesGeometry(curbs), [MAT.curb()], { cast: false }));
     const dashes = [];
     const zc = front + SIDEWALK + STREET / 2;
-    for (let x = -60; x < 60; x += 4) dashes.push({ x0: x, x1: x + 2.2, y0: -0.12, y1: -0.115, z0: zc - 0.06, z1: zc + 0.06 });
+    for (let x = -150; x < 150; x += 4) dashes.push({ x0: x, x1: x + 2.2, y0: -0.12, y1: -0.115, z0: zc - 0.06, z1: zc + 0.06 });
     g.add(mesh(boxesGeometry(dashes), [MAT.white()], { cast: false }));
   }
+  // ------------------------------------------------------------------ ground: natural lawn fading into the haze
+  /** Deterministic smooth value noise in [0,1] (world metres). */
+  function hash2(ix, iz) {
+    let h = (ix * 374761393 + iz * 668265263) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  }
+  function valueNoise(x, z) {
+    const ix = Math.floor(x), iz = Math.floor(z), fx = x - ix, fz = z - iz;
+    const sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
+    const a = hash2(ix, iz), b = hash2(ix + 1, iz), c = hash2(ix, iz + 1), d = hash2(ix + 1, iz + 1);
+    return P.lerp(P.lerp(a, b, sx), P.lerp(c, d, sx), sz);
+  }
+  const fbm = (x, z) => 0.55 * valueNoise(x / 23, z / 23) + 0.3 * valueNoise(x / 9 + 17.3, z / 9 - 4.1) + 0.15 * valueNoise(x / 3.7 - 8.2, z / 3.7 + 2.9);
+  // linear-space multipliers of the (desaturated) lawn texture
+  const LAWN = [1, 1, 1];
+  const DRY = [1.55, 1.18, 1.25]; // dry, straw-tinted grass away from the lot
+  /** Vertex colour of the ground at world (x, z) m: large-scale patches + drier grass far from the lot. */
+  function groundTint(x, z, lot) {
+    const dx = Math.max(0, -x, x - lot.w), dz = Math.max(0, -z, z - lot.h);
+    const n = fbm(x, z);
+    const dry = P.clamp(0.75 * P.clamp((Math.hypot(dx, dz) - 4) / 30, 0, 1) + (n - 0.5) * 0.7, 0, 1);
+    const bright = 0.84 + 0.3 * n;
+    return [0, 1, 2].map((k) => P.lerp(LAWN[k], DRY[k], dry) * bright);
+  }
+  /**
+   * Subdivided ground over [x0,x1]×[z0,z1] (m) with vertex colours; vertices crowd near the lot (quadratic spacing)
+   * so the variation is fine where the camera looks and cheap towards the horizon.
+   */
+  function groundGrid(x0, x1, z0, z1, y, lotM, material) {
+    const T = S.THREE;
+    const axis = (a0, a1, centre, n) => {
+      const out = [];
+      for (let i = 0; i <= n; i++) {
+        const u = (i / n) * 2 - 1;
+        const v = Math.sign(u) * u * u;
+        out.push(v < 0 ? centre + v * (centre - a0) : centre + v * (a1 - centre));
+      }
+      return out;
+    };
+    const xs = axis(x0, x1, P.clamp(lotM.w / 2, x0, x1), 110), zs = axis(z0, z1, P.clamp(lotM.h / 2, z0, z1), 110);
+    const pos = [], uv = [], col = [], idx = [];
+    zs.forEach((z) =>
+      xs.forEach((x) => {
+        pos.push(x, y, z);
+        uv.push(x, -z);
+        const c = groundTint(x, z, lotM);
+        col.push(c[0], c[1], c[2]);
+      })
+    );
+    const nx = xs.length;
+    for (let j = 0; j + 1 < zs.length; j++)
+      for (let i = 0; i + 1 < nx; i++) {
+        const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+    const geo = new T.BufferGeometry();
+    geo.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
+    geo.setAttribute('color', new T.Float32BufferAttribute(col, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const m = mesh(geo, material, { cast: false });
+    m.userData.ground = true;
+    return m;
+  }
+  /** Lawn: the catalogue grass, desaturated (the raw texture reads lime under the ACES sun) and tinted per vertex. */
+  function lawnMaterial() {
+    return cached(S.res.mats, 'site|lawn', () => {
+      const T = S.THREE;
+      let src = null;
+      try {
+        src = DD.materials && DD.materials.canvas ? DD.materials.canvas('grama') : null;
+      } catch (e) {
+        console.warn('[view3d] grass texture failed', e);
+      }
+      const tex = src ? desaturatedTexture(src) : null;
+      const m = new T.MeshStandardMaterial({ map: tex, color: tex ? '#FFFFFF' : '#6E8250', vertexColors: true, roughness: 0.97, metalness: 0 });
+      m.name = 'v3d:lawn';
+      return m;
+    });
+  }
+  function desaturatedTexture(src) {
+    const T = S.THREE;
+    const c = document.createElement('canvas');
+    c.width = src.width;
+    c.height = src.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(src, 0, 0);
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    // mean colour of the tile: pulling every texel towards it removes the tile-sized features that make the
+    // repetition visible from the aerial view; the large-scale variation comes from the ground's vertex tint
+    const mean = [0, 0, 0];
+    for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++) mean[k] += d[i + k];
+    const n = d.length / 4;
+    for (let k = 0; k < 3; k++) mean[k] /= n;
+    const LOCAL_CONTRAST = 0.5;
+    for (let i = 0; i < d.length; i += 4) {
+      for (let k = 0; k < 3; k++) d[i + k] = mean[k] + (d[i + k] - mean[k]) * LOCAL_CONTRAST;
+      const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+      d[i] = P.clamp(P.lerp(l, d[i], 0.52) * 1.02 + 6, 0, 255);
+      d[i + 1] = P.clamp(P.lerp(l, d[i + 1], 0.52) + 3, 0, 255);
+      d[i + 2] = P.clamp(P.lerp(l, d[i + 2], 0.52) * 0.96, 0, 255);
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new T.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = T.RepeatWrapping;
+    const rep = 1000 / 2300; // larger tile than the plan swatch: less visible repetition
+    tex.repeat.set(rep, rep);
+    tex.colorSpace = T.SRGBColorSpace;
+    tex.anisotropy = S.renderer.capabilities.getMaxAnisotropy();
+    return tex;
+  }
   function buildGround(g, lot) {
-    const grass = siteMaterial('grama', '#5E7F3A');
-    const front = lot.h * MM, far = front + 2 * SIDEWALK + STREET;
-    g.add(groundPlane(-WORLD_HALF, WORLD_HALF, -WORLD_HALF, front, GROUND_Y, grass));
-    g.add(groundPlane(-WORLD_HALF, WORLD_HALF, far, WORLD_HALF, GROUND_Y, grass));
+    const grass = lawnMaterial();
+    const lotM = { w: lot.w * MM, h: lot.h * MM };
+    const front = lotM.h, far = front + 2 * SIDEWALK + STREET;
+    g.add(groundGrid(-WORLD_HALF, WORLD_HALF, -WORLD_HALF, front, GROUND_Y, lotM, grass));
+    g.add(groundGrid(-WORLD_HALF, WORLD_HALF, far, WORLD_HALF, GROUND_Y, lotM, grass));
   }
   /** Surfaces drawn under the plan on the Térreo (paving, driveway). Grass zones are the ground itself. */
   function buildZones(g, site) {
@@ -1268,23 +1667,68 @@
       g.add(groundPlane(z.x * MM, (z.x + z.w) * MM, z.y * MM, (z.y + z.h) * MM, ZONE_Y, mat));
     });
   }
-  /** Faint context: neighbouring lots as light massing blocks with thin lot lines. */
+  /**
+   * Understated context: small single-storey neighbour houses with gable roofs in a pale clay tone (distinct from
+   * the warm-white house, much lower than it, set back from the shared muros) and thin lot lines.
+   */
   function buildNeighbours(g, lot) {
     const W = lot.w * MM, H = lot.h * MM;
-    const blocks = [
-      { lot: -1, x0: 0.18, x1: 0.84, z0: 0.24, z1: 0.66, h: 3.1 },
-      { lot: -2, x0: 0.14, x1: 0.86, z0: 0.3, z1: 0.72, h: 2.9 },
-      { lot: 1, x0: 0.16, x1: 0.82, z0: 0.26, z1: 0.64, h: 3.3 },
-      { lot: 2, x0: 0.2, x1: 0.85, z0: 0.28, z1: 0.74, h: 3.0 },
-    ];
-    const boxes = blocks.map((b) => ({ x0: (b.lot + b.x0) * W, x1: (b.lot + b.x1) * W, y0: 0, y1: b.h, z0: b.z0 * H, z1: b.z1 * H, noBottom: true }));
-    const across = [-1, 0, 1, 2].map((k, i) => ({ x0: k * W + 0.8, x1: (k + 1) * W - 0.8, y0: 0, y1: [3.0, 3.4, 2.9, 3.2][i], z0: H + 2 * SIDEWALK + STREET + 5, z1: H + 2 * SIDEWALK + STREET + 16, noBottom: true }));
-    const m = mesh(boxesGeometry(boxes.concat(across)), [MAT.neighbour()], { cast: false, receive: true });
-    g.add(m);
+    const across = H + 2 * SIDEWALK + STREET;
+    // x0/x1: fraction of the lot width; z0/z1: metres; e: eave height; r: ridge rise; ridge along z unless rx
+    const houses = [
+      { lot: -1, x0: 0.2, x1: 0.72, z0: 5.5, z1: 12.5, e: 2.7, r: 1.3 },
+      { lot: -2, x0: 0.24, x1: 0.78, z0: 6.5, z1: 13, e: 2.6, r: 1.2 },
+      { lot: 1, x0: 0.28, x1: 0.8, z0: 5, z1: 12, e: 2.8, r: 1.35 },
+      { lot: 2, x0: 0.2, x1: 0.74, z0: 6, z1: 12.5, e: 2.6, r: 1.25 },
+    ].map((h) => ({ x0: (h.lot + h.x0) * W, x1: (h.lot + h.x1) * W, z0: h.z0, z1: h.z1, e: h.e, r: h.r, rx: false }));
+    [-1, 0, 1, 2].forEach((k, i) => {
+      const z0 = across + 5 + (i % 2), dz = 6.5 + (i % 3) * 0.6;
+      houses.push({ x0: k * W + 1.7, x1: (k + 1) * W - 1.7, z0, z1: z0 + dz, e: 2.6 + (i % 2) * 0.2, r: 1.2, rx: true });
+    });
+    const bodies = houses.map((h) => ({ x0: h.x0, x1: h.x1, y0: 0, y1: h.e, z0: h.z0, z1: h.z1, noBottom: true }));
+    g.add(mesh(boxesGeometry(bodies), [MAT.neighbour()], { cast: false, receive: true }));
+    const roofs = gableRoofs(houses);
+    g.add(mesh(roofs.roof, MAT.neighbourRoof(), { cast: false, receive: true }));
+    g.add(mesh(roofs.gables, MAT.neighbour(), { cast: false, receive: true }));
     const lines = [];
     for (let k = -2; k <= 3; k++) if (k !== 0 && k !== 1) lines.push({ x0: k * W - 0.05, x1: k * W + 0.05, y0: GROUND_Y, y1: 0.35, z0: 0, z1: H });
     lines.push({ x0: -2 * W, x1: 0, y0: GROUND_Y, y1: 0.35, z0: -0.05, z1: 0.05 }, { x0: W, x1: 3 * W, y0: GROUND_Y, y1: 0.35, z0: -0.05, z1: 0.05 });
     g.add(mesh(boxesGeometry(lines), [MAT.muro()], { cast: false }));
+  }
+  /** Gable roofs (0,35 m overhang) over massing boxes → { roof, gables } flat-shaded geometries. */
+  function gableRoofs(houses) {
+    const T = S.THREE;
+    const roof = [], gables = [];
+    const tri = (arr, a, b, c, out) => {
+      // wind so that the face normal points along `out`
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+      const pts = n[0] * out[0] + n[1] * out[1] + n[2] * out[2] >= 0 ? [a, b, c] : [a, c, b];
+      pts.forEach((p) => arr.push(p[0], p[1], p[2]));
+    };
+    const quad = (arr, a, b, c, d, out) => {
+      tri(arr, a, b, c, out);
+      tri(arr, a, c, d, out);
+    };
+    houses.forEach((h) => {
+      const oh = 0.35;
+      // local frame: "a" = the axis the roof slopes along, "l" = the ridge axis
+      const map = h.rx ? (a, y, l) => [l, y, a] : (a, y, l) => [a, y, l];
+      const a0 = h.rx ? h.z0 : h.x0, a1 = h.rx ? h.z1 : h.x1, l0 = h.rx ? h.x0 : h.z0, l1 = h.rx ? h.x1 : h.z1;
+      const am = (a0 + a1) / 2, top = h.e + h.r, s = h.r / (am - a0);
+      const eave = h.e - oh * s;
+      const outA = (sg) => (h.rx ? [0, 1, sg] : [sg, 1, 0]);
+      quad(roof, map(a0 - oh, eave, l0 - oh), map(am, top, l0 - oh), map(am, top, l1 + oh), map(a0 - oh, eave, l1 + oh), outA(-1));
+      quad(roof, map(a1 + oh, eave, l0 - oh), map(am, top, l0 - oh), map(am, top, l1 + oh), map(a1 + oh, eave, l1 + oh), outA(1));
+      [[l0, -1], [l1, 1]].forEach((e) => tri(gables, map(a0, h.e, e[0]), map(a1, h.e, e[0]), map(am, top, e[0]), h.rx ? [e[1], 0, 0] : [0, 0, e[1]]));
+    });
+    const geo = (arr) => {
+      const g = new T.BufferGeometry();
+      g.setAttribute('position', new T.Float32BufferAttribute(arr, 3));
+      g.computeVertexNormals();
+      return g;
+    };
+    return { roof: geo(roof), gables: geo(gables) };
   }
   function buildTrees(g, lot) {
     const T = S.THREE;
@@ -1324,7 +1768,7 @@
       uniforms: {
         top: { value: new T.Color(COLORS.sky) },
         horizon: { value: new T.Color(COLORS.horizon) },
-        bottom: { value: new T.Color(COLORS.groundFar) },
+        bottom: { value: new T.Color(COLORS.horizon) }, // below the horizon = the fog colour
       },
       vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
       fragmentShader:
@@ -1368,12 +1812,23 @@
     const below = index > 0 ? doc.floors[index - 1].id : null;
     const walls = doc.walls.filter((w) => w.floor === floor.id);
     const wallIds = new Set(walls.map((w) => w.id));
-    return [floor, index === doc.floors.length - 1]
+    return [floor, index === doc.floors.length - 1, contKey(doc, floor.id, null)]
       .concat(walls)
       .concat(doc.openings.filter((o) => wallIds.has(o.wall)))
       .concat(doc.roomSeeds.filter((s) => s.floor === floor.id))
       .concat((doc.separators || []).filter((s) => s.floor === floor.id))
       .concat(doc.stairs.filter((s) => s.floor === floor.id || s.floor === below));
+  }
+  /** Value key of the window continuations touching a floor (or one wall): they tie two floors together. */
+  function contKey(doc, floorId, wallId) {
+    return P.windowContinuations(doc)
+      .filter((c) => (wallId ? c.lowerWall === wallId || c.upperWall === wallId : c.floor === floorId || c.lowerFloor === floorId))
+      .map((c) => [c.opId, c.upperWall, Math.round(c.t), Math.round(c.width), Math.round(c.height)].join(':'))
+      .join('|');
+  }
+  /** Identity list of one wall's 3D inputs (wall, its openings, continuations). */
+  function wallSignature(doc, w) {
+    return [w, contKey(doc, null, w.id)].concat(doc.openings.filter((o) => o.wall === w.id));
   }
   function forgetIndex(arch) {
     if (!arch) return;
@@ -1381,14 +1836,21 @@
       const u = o.userData;
       if (u.wallId && S.index.walls.get(u.wallId) === o) S.index.walls.delete(u.wallId);
       if (u.openingId && S.index.openings.get(u.openingId) === o) S.index.openings.delete(u.openingId);
+      if (u.openingId && S.index.openingParts.get(u.openingId) === o) S.index.openingParts.delete(u.openingId);
       if (u.roomId && S.index.rooms.get(u.roomId) === o) S.index.rooms.delete(u.roomId);
     });
   }
-  /** Rebuild one floor's architecture if its inputs changed. → true when rebuilt. */
-  function syncFloor(doc, floor, index) {
+  /**
+   * Rebuild one floor's architecture if its inputs changed. → true when something was rebuilt.
+   * `transient` (a drag preview inside a gesture): only the walls that changed are rebuilt, and the room floors /
+   * slab / roof at most every SURF_THROTTLE_MS; the full rebuild happens when the gesture ends (or is cancelled).
+   */
+  const SURF_THROTTLE_MS = 140;
+  function syncFloor(doc, floor, index, transient) {
     const fg = S.floors.get(floor.id);
     const sig = archSignature(doc, floor, index);
-    if (fg.arch && sameList(sig, fg.sig)) return false;
+    if (fg.arch && !fg.partial && sameList(sig, fg.sig)) return false;
+    if (transient && fg.arch && fg.walls && sameList(stairsOf(doc, floor, index), fg.stairs)) return patchFloor(doc, floor, index, fg);
     forgetIndex(fg.arch);
     disposeTree(fg.arch);
     disposeTree(fg.roof);
@@ -1397,7 +1859,69 @@
     fg.roof = index === doc.floors.length - 1 ? buildRoof(doc, floor) : null;
     if (fg.roof) fg.root.add(fg.roof);
     fg.sig = sig;
+    fg.partial = false;
+    fg.surfSig = surfacesSignature(doc, floor);
+    fg.surfAt = performance.now();
+    fg.stairs = stairsOf(doc, floor, index);
+    fg.walls = new Map(doc.walls.filter((w) => w.floor === floor.id).map((w) => [w.id, wallSignature(doc, w)]));
     return true;
+  }
+  function stairsOf(doc, floor, index) {
+    const below = index > 0 ? doc.floors[index - 1].id : null;
+    return doc.stairs.filter((s) => s.floor === floor.id || s.floor === below);
+  }
+  function surfacesSignature(doc, floor) {
+    return [doc.walls, doc.roomSeeds, doc.separators, contKey(doc, floor.id, null)];
+  }
+  /** Cheap per-frame update during a drag: changed walls now, room floors / slab / roof throttled. */
+  function patchFloor(doc, floor, index, fg) {
+    const arch = fg.arch;
+    let changed = false;
+    const seen = new Set();
+    doc.walls.forEach((w) => {
+      if (w.floor !== floor.id) return;
+      seen.add(w.id);
+      const sig = wallSignature(doc, w);
+      if (sameList(sig, fg.walls.get(w.id))) return;
+      const old = S.index.walls.get(w.id);
+      if (old) {
+        forgetIndex(old);
+        disposeTree(old);
+      }
+      addWallGroup(arch, doc, w, floor);
+      fg.walls.set(w.id, sig);
+      changed = true;
+    });
+    Array.from(fg.walls.keys()).forEach((id) => {
+      if (seen.has(id)) return;
+      const old = S.index.walls.get(id);
+      if (old) {
+        forgetIndex(old);
+        disposeTree(old);
+      }
+      fg.walls.delete(id);
+      changed = true;
+    });
+    const surfSig = surfacesSignature(doc, floor);
+    if (!sameList(surfSig, fg.surfSig)) {
+      const now = performance.now();
+      if (now - fg.surfAt >= SURF_THROTTLE_MS) {
+        forgetIndex(arch.userData.surfaces);
+        disposeTree(arch.userData.surfaces);
+        arch.userData.surfaces = buildFloorSurfaces(doc, floor, index);
+        arch.add(arch.userData.surfaces);
+        if (fg.roof) {
+          disposeTree(fg.roof);
+          fg.roof = buildRoof(doc, floor);
+          if (fg.roof) fg.root.add(fg.roof);
+        }
+        fg.surfSig = surfSig;
+        fg.surfAt = now;
+        changed = true;
+      } else S.surfDue = Math.max(S.surfDue || 0, fg.surfAt + SURF_THROTTLE_MS);
+    }
+    fg.partial = true;
+    return changed;
   }
 
   // ------------------------------------------------------------------ furniture (cached per id)
@@ -1477,8 +2001,10 @@
   const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const isWalking = () => !!S.walk && S.walk.enabled;
 
+  /** Upper floors and the roof are shown (walk mode / 'Pavimentos superiores'), except in the transition cutaway. */
+  const showsUpper = (ui) => !S.cutaway && (isWalking() || !!ui.showAllFloors);
   function floorShouldShow(doc, ui, idx) {
-    if (isWalking() || ui.showAllFloors) return true;
+    if (showsUpper(ui)) return true;
     const active = doc.floors.findIndex((f) => f.id === ui.floor);
     return idx <= Math.max(0, active);
   }
@@ -1491,9 +2017,18 @@
       const show = floorShouldShow(doc, ui, i);
       if (show !== fg.shown) startFloorAnim(fg, show, animate);
       fg.furn.visible = showFurniture;
-      if (fg.roof) fg.roof.visible = isWalking() || !!ui.showAllFloors;
+      if (fg.roof) fg.roof.visible = showsUpper(ui);
     });
     requestRender();
+  }
+  /**
+   * Cutaway for 2D↔3D transitions: the camera is top-down on the ACTIVE floor, so the floors above it and the
+   * roof are hidden (instantly) while it is on; turning it off lets them slide back in.
+   */
+  function setCutaway(on, animate) {
+    if (S.cutaway === !!on) return;
+    S.cutaway = !!on;
+    updateVisibility(!!animate);
   }
   function startFloorAnim(fg, show, animate) {
     fg.shown = show;
@@ -1524,16 +2059,17 @@
   }
 
   // ------------------------------------------------------------------ selection / hover highlight
-  function objectFor(ref) {
-    if (!ref) return null;
+  /** Scene objects that represent a selection ref (a window continuing on the floor above has two parts). */
+  function objectsFor(ref) {
+    if (!ref) return [];
+    let list = [];
     if (ref.kind === 'furniture') {
       const rec = S.furniture.get(ref.id);
-      return rec ? rec.obj : null;
-    }
-    if (ref.kind === 'wall') return S.index.walls.get(ref.id) || null;
-    if (ref.kind === 'opening') return S.index.openings.get(ref.id) || null;
-    if (ref.kind === 'room') return S.index.rooms.get(ref.id) || null;
-    return null;
+      list = [rec && rec.obj];
+    } else if (ref.kind === 'wall') list = [S.index.walls.get(ref.id)];
+    else if (ref.kind === 'opening') list = [S.index.openings.get(ref.id), S.index.openingParts.get(ref.id)];
+    else if (ref.kind === 'room') list = [S.index.rooms.get(ref.id)];
+    return list.filter(Boolean);
   }
   function clearHighlights() {
     for (let i = S.highlighted.length - 1; i >= 0; i--) S.highlighted[i].mesh.material = S.highlighted[i].material;
@@ -1575,13 +2111,9 @@
     clearHighlights();
     const ui = uiNow();
     const sel = ui.selection, hov = S.drag ? null : ui.hover;
-    if (hov && !sameRef(hov, sel)) {
-      const o = objectFor(hov);
-      if (o) tintObject(o, 'hov');
-    }
+    if (hov && !sameRef(hov, sel)) objectsFor(hov).forEach((o) => tintObject(o, 'hov'));
     if (sel) {
-      const o = objectFor(sel);
-      if (o) tintObject(o, 'sel');
+      objectsFor(sel).forEach((o) => tintObject(o, 'sel'));
       if (sel.kind === 'furniture') addOutline(sel.id);
     }
     requestRender();
@@ -1590,6 +2122,14 @@
   // ------------------------------------------------------------------ rebuild pass (once per frame, if dirty)
   function flushRebuild() {
     const doc = docNow();
+    if (S.surfDue && performance.now() >= S.surfDue) {
+      // throttled room-floor / slab refresh of a drag that paused between previews
+      S.surfDue = 0;
+      S.floors.forEach((fg, id) => {
+        if (fg.partial) S.dirty.floors.add(id);
+      });
+      S.dirty.transient = !!(store() && store().inGesture());
+    }
     const d = S.dirty;
     if (!d.site && !d.floors.size && !d.furniture && !d.visibility && !d.highlight) return;
     let changed = false;
@@ -1604,13 +2144,13 @@
       clearHighlights();
       ensureFloorGroups(doc);
       doc.floors.forEach((f, i) => {
-        if (syncFloor(doc, f, i)) changed = true;
+        if (d.floors.has(f.id) && syncFloor(doc, f, i, !!d.transient)) changed = true;
       });
     }
     if (d.furniture && syncFurniture(doc)) changed = true;
     if (changed || d.floors.size || d.furniture) S.dirty.colliders = true;
     const vis = d.visibility || d.floors.size > 0;
-    S.dirty = { floors: new Set(), furniture: false, site: false, visibility: false, highlight: false, colliders: S.dirty.colliders };
+    S.dirty = { floors: new Set(), furniture: false, site: false, visibility: false, highlight: false, transient: false, colliders: S.dirty.colliders };
     if (vis) updateVisibility(true);
     applyHighlights();
     requestRender();
@@ -1620,6 +2160,9 @@
   // Summer late-afternoon sun from the street-left side, so the facade reads in the default aerial view.
   const SUN_DIR = { x: -0.55, y: 0.95, z: 0.5 };
   const LIGHT = { sun: 2.9, hemi: 1.15, hemiWalk: 1.5, ambient: 0.18, ambientWalk: 0.7 };
+  // Hemisphere ground (bounce) colour: light warm grey, so downward faces (ceilings, soffits) read as plaster,
+  // a touch brighter indoors where the bounce comes from pale floors and walls.
+  const BOUNCE = { orbit: '#CFC6B6', walk: '#E6DED0' };
 
   function createRenderer() {
     const T = S.THREE;
@@ -1637,7 +2180,7 @@
   }
   function createLights(scene) {
     const T = S.THREE;
-    S.hemi = new T.HemisphereLight('#DCEBF7', '#8C8069', LIGHT.hemi);
+    S.hemi = new T.HemisphereLight('#DCEBF7', BOUNCE.orbit, LIGHT.hemi);
     S.ambient = new T.AmbientLight('#FFF4E6', LIGHT.ambient);
     const sun = new T.DirectionalLight('#FFE3C2', LIGHT.sun);
     sun.castShadow = true;
@@ -1667,7 +2210,7 @@
   function createScene() {
     const T = S.THREE;
     const scene = new T.Scene();
-    scene.fog = new T.Fog(COLORS.horizon, 80, 300);
+    scene.fog = new T.Fog(COLORS.horizon, FOG.near, FOG.far);
     S.sky = buildSky();
     scene.add(S.sky);
     S.world = new T.Group();
@@ -1686,6 +2229,9 @@
     c.screenSpacePanning = false;
     c.zoomToCursor = true;
     c.addEventListener('change', requestRender);
+    c.addEventListener('start', () => {
+      S.atHome = false; // the user took the camera: stop re-fitting it automatically
+    });
     return c;
   }
 
@@ -1708,7 +2254,7 @@
     return { pos: c.position.clone(), target, up: c.up.clone() };
   }
   function homePose() {
-    return isWalking() ? walkPose() : P.aerialPose(docNow(), uiNow().floor);
+    return isWalking() ? walkPose() : aerialHome();
   }
   /** Put orbit controls back in charge of a (non top-down) pose. */
   function settleOrbit(target) {
@@ -1725,36 +2271,66 @@
     clearTimeout(tw.timer);
     if (tw.done) tw.done(false);
   }
-  /** Ease position/target (easeInOutCubic) and nlerp the up vector; controls are disabled meanwhile. */
+  /**
+   * Ease position/target (easeInOutCubic) and nlerp the up vector; controls are disabled meanwhile.
+   * opts: { keepUp, done(ok), home (ends on the automatic framing), path: null | 'descend' | 'ascend' }.
+   * The clock advances at most TWEEN_MAX_STEP_MS per frame, so a stalled frame (e.g. first-time GPU uploads)
+   * slows the move down instead of making the camera jump.
+   */
+  const TWEEN_MAX_STEP_MS = 34;
   function tweenCamera(from, to, ms, opts) {
     cancelTween();
     const o = opts || {};
     const dur = reducedMotion() ? 1 : Math.max(1, ms);
-    const tw = { from: toPlain(from), to: toPlain(to), t0: performance.now(), ms: dur, keepUp: !!o.keepUp, done: o.done || null, timer: 0 };
-    // Safety net: animation frames are paused in hidden tabs — never leave a transition Promise pending.
-    tw.timer = setTimeout(() => {
-      if (S.tween !== tw) return;
-      stepTween(tw.t0 + tw.ms + 1);
-      if (S.ready) render();
-    }, dur + TWEEN_GRACE_MS);
+    const tw = { from: toPlain(from), to: toPlain(to), ms: dur, elapsed: 0, last: null, keepUp: !!o.keepUp, home: !!o.home, path: o.path || null, done: o.done || null, timer: 0 };
+    armTweenTimer(tw, dur + TWEEN_GRACE_MS);
     S.tween = tw;
+    S.atHome = false;
     if (S.orbit) S.orbit.enabled = false;
     requestRender();
   }
+  /** Safety net: animation frames are paused in hidden tabs — never leave a transition Promise pending. */
+  function armTweenTimer(tw, ms) {
+    clearTimeout(tw.timer);
+    tw.timer = setTimeout(() => {
+      if (S.tween !== tw) return;
+      if (tw.last != null && performance.now() - tw.last < 200) {
+        armTweenTimer(tw, Math.max(50, tw.ms - tw.elapsed + TWEEN_GRACE_MS)); // frames still running, just slow
+        return;
+      }
+      stepTween(0, true);
+      if (S.ready) render();
+    }, ms);
+  }
   const toPlain = (p) => ({ pos: { x: p.pos.x, y: p.pos.y, z: p.pos.z }, target: { x: p.target.x, y: p.target.y, z: p.target.z }, up: { x: p.up.x, y: p.up.y, z: p.up.z } });
   const lerp3 = (a, b, t) => ({ x: P.lerp(a.x, b.x, t), y: P.lerp(a.y, b.y, t), z: P.lerp(a.z, b.z, t) });
-  function stepTween(now) {
+  /** Separate horizontal / vertical easing: 'descend' glides above first then drops in; 'ascend' is the reverse. */
+  function pathEasing(path, t) {
+    const E = P.easeInOutCubic;
+    if (path === 'descend') return { h: E(P.clamp(t / 0.6, 0, 1)), v: E(P.clamp((t - 0.3) / 0.7, 0, 1)) };
+    if (path === 'ascend') return { h: E(P.clamp((t - 0.35) / 0.65, 0, 1)), v: E(P.clamp(t / 0.7, 0, 1)) };
+    const e = E(t);
+    return { h: e, v: e };
+  }
+  const lerpHV = (a, b, e) => ({ x: P.lerp(a.x, b.x, e.h), y: P.lerp(a.y, b.y, e.v), z: P.lerp(a.z, b.z, e.h) });
+  function stepTween(now, force) {
     const tw = S.tween;
     if (!tw) return false;
-    const t = P.clamp((now - tw.t0) / tw.ms, 0, 1);
-    const e = P.easeInOutCubic(t);
-    const up = lerp3(tw.from.up, tw.to.up, e);
+    if (force) tw.elapsed = tw.ms;
+    else {
+      if (tw.last != null) tw.elapsed += P.clamp(now - tw.last, 0, TWEEN_MAX_STEP_MS);
+      tw.last = now;
+    }
+    const t = P.clamp(tw.elapsed / tw.ms, 0, 1);
+    const e = pathEasing(tw.path, t);
+    const up = lerp3(tw.from.up, tw.to.up, e.v);
     const len = Math.hypot(up.x, up.y, up.z);
-    applyPose({ pos: lerp3(tw.from.pos, tw.to.pos, e), target: lerp3(tw.from.target, tw.to.target, e), up: len > 1e-3 ? up : tw.to.up });
+    applyPose({ pos: lerpHV(tw.from.pos, tw.to.pos, e), target: lerpHV(tw.from.target, tw.to.target, e), up: len > 1e-3 ? up : tw.to.up });
     if (t < 1) return true;
     S.tween = null;
     clearTimeout(tw.timer);
     if (!tw.keepUp) finishPose(tw.to);
+    S.atHome = tw.home && !isWalking();
     if (tw.done) tw.done(true);
     return true;
   }
@@ -1763,29 +2339,52 @@
     else settleOrbit(pose.target);
   }
 
+  /**
+   * 2D → 3D: start top-down exactly on the active floor as drawn in 2D (floors above and the roof hidden), ease to
+   * the home pose, then let the upper floors slide back in. Walk mode: glide above the walker, then descend
+   * vertically into the (open-topped) room so the camera never passes through a slab.
+   */
   function transitionFrom2D(vp, ms) {
     if (!S.ready) return Promise.resolve(false);
     resize();
     const doc = docNow();
     const floor = floorOf(doc, uiNow().floor);
     const start = P.topDownPose(vp, floor.level, S.camera.fov);
-    S.pendingAerial = false;
     if (!start) {
       jumpHome();
       return Promise.resolve(false);
     }
+    cancelTween(); // (a pending 3D→2D tween marks pendingAerial when cancelled: clear it after)
+    S.pendingAerial = false;
+    setCutaway(true, false);
+    flushRebuild();
     applyPose(start);
-    return new Promise((resolve) => tweenCamera(start, homePose(), ms == null ? 1100 : ms, { done: resolve }));
+    const walking = isWalking();
+    const home = homePose();
+    return new Promise((resolve) =>
+      tweenCamera(start, home, ms == null ? 1100 : ms, {
+        path: walking ? 'descend' : null,
+        home: !walking,
+        done: (ok) => {
+          setCutaway(false, !walking);
+          resolve(ok);
+        },
+      })
+    );
   }
+  /** 3D → 2D: hide the floors above (they slide away), then ease to top-down on the active floor (walk: rise first). */
   function transitionTo2D(vp, ms) {
     if (!S.ready) return Promise.resolve(false);
     exitPointerLock();
     const floor = floorOf(docNow(), uiNow().floor);
     const end = P.topDownPose(vp, floor.level, S.camera.fov);
     if (!end) return Promise.resolve(false);
+    const walking = isWalking();
+    setCutaway(true, !walking);
     return new Promise((resolve) =>
       tweenCamera(currentPose(), end, ms == null ? 900 : ms, {
         keepUp: true,
+        path: walking ? 'ascend' : null,
         done: (ok) => {
           S.pendingAerial = true; // the next time the 3D view shows without a transition, start from home
           resolve(ok);
@@ -1793,13 +2392,19 @@
       })
     );
   }
+  /** Home pose of the current mode, framed for the current viewport aspect. */
+  function aerialHome(floorId) {
+    return P.aerialPose(docNow(), floorId || uiNow().floor, { aspect: S.camera.aspect, fov: FOV_ORBIT, allFloors: !!uiNow().showAllFloors });
+  }
   /** Instant reset to the home pose of the current mode. */
   function jumpHome() {
     cancelTween();
     S.pendingAerial = false;
+    setCutaway(false, false);
     const pose = homePose();
     applyPose(pose);
     finishPose(pose);
+    S.atHome = !isWalking();
   }
   /** Smoothly bring the camera back to the active floor (orbit) or respawn (walk). */
   function recenter() {
@@ -1808,16 +2413,38 @@
       spawnWalker(uiNow().floor);
       return;
     }
-    tweenCamera(currentPose(), P.aerialPose(docNow(), uiNow().floor), 650, {});
+    tweenCamera(currentPose(), aerialHome(), 650, { home: true });
   }
-  /** Orbit mode: when the active floor changes, glide the target to the new floor keeping the view angle. */
+  /**
+   * Orbit mode: when the active floor changes, re-frame the new floor if the camera was on its automatic framing,
+   * otherwise glide the target to the new floor keeping the user's view angle and distance.
+   */
   function glideToFloor(floorId) {
     if (!S.orbit || S.tween || S.pendingAerial) return;
     const cur = currentPose();
-    const next = P.aerialPose(docNow(), floorId).target;
+    const home = aerialHome(floorId);
+    if (S.atHome) {
+      tweenCamera(cur, home, 560, { home: true });
+      return;
+    }
+    const next = home.target;
     const dx = next.x - cur.target.x, dy = next.y - cur.target.y, dz = next.z - cur.target.z;
     const to = { pos: { x: cur.pos.x + dx, y: cur.pos.y + dy, z: cur.pos.z + dz }, target: next, up: { x: 0, y: 1, z: 0 } };
     tweenCamera(cur, to, 520, {});
+  }
+  /** After a layout change (split view, window resize): keep the automatic framing fitted to the new aspect. */
+  function refitHome() {
+    if (!S.ready || isWalking() || S.pendingAerial) return;
+    const tw = S.tween;
+    if (tw && tw.home) {
+      tw.to = toPlain(aerialHome());
+      return;
+    }
+    if (!tw && S.atHome) {
+      const pose = aerialHome();
+      applyPose(pose);
+      settleOrbit(pose.target);
+    }
   }
   /** Keep the orbit camera above the ground and the target near the lot. */
   function constrainOrbit() {
@@ -1846,6 +2473,7 @@
     S.renderer.setSize(w, h, false);
     S.camera.aspect = w / h;
     S.camera.updateProjectionMatrix();
+    refitHome();
     requestRender();
   }
 
@@ -1969,6 +2597,8 @@
   }
   function enterWalk() {
     S.orbitPose = toPlain(currentPose());
+    S.orbitPoseHome = S.atHome; // an automatic framing is recomputed on return (aspect / floor may have changed)
+    S.atHome = false;
     S.walk.enabled = true;
     S.orbit.enabled = false;
     S.camera.fov = FOV_WALK;
@@ -1976,6 +2606,7 @@
     S.camera.updateProjectionMatrix();
     S.ambient.intensity = LIGHT.ambientWalk;
     S.hemi.intensity = LIGHT.hemiWalk;
+    S.hemi.groundColor.set(BOUNCE.walk);
     clearHover();
     spawnWalker(uiNow().floor);
   }
@@ -1988,9 +2619,11 @@
     S.camera.updateProjectionMatrix();
     S.ambient.intensity = LIGHT.ambient;
     S.hemi.intensity = LIGHT.hemi;
-    const to = S.orbitPose && !S.pendingAerial ? S.orbitPose : P.aerialPose(docNow(), uiNow().floor);
+    S.hemi.groundColor.set(BOUNCE.orbit);
+    const restore = S.orbitPose && !S.pendingAerial && !S.orbitPoseHome;
+    const to = restore ? S.orbitPose : aerialHome();
     S.pendingAerial = false;
-    tweenCamera(from, to, 700, {});
+    tweenCamera(from, to, 700, { home: !restore });
   }
   function updateWalkUI() {
     if (!S.container) return;
@@ -2129,7 +2762,13 @@
     const cur = DD.ops.byId(doc, 'furniture', d.id);
     const p = rayToPlane(e, d.planeY);
     if (!cur || !p) return;
-    let prop = { x: Math.round(p.x / MM + d.offX), y: Math.round(p.z / MM + d.offY), rot: d.rot0 };
+    // keep the item on the lot: a ray grazing the horizon must not throw furniture kilometres away
+    const lot = (doc.site && doc.site.lot) || { w: 9000, h: 20000 };
+    let prop = {
+      x: P.clamp(Math.round(p.x / MM + d.offX), 0, lot.w),
+      y: P.clamp(Math.round(p.z / MM + d.offY), 0, lot.h),
+      rot: d.rot0,
+    };
     if (uiNow().snap && !e.altKey && !isFlatType(cur.type)) {
       try {
         const s = DD.geom.snapFurniture(doc, cur.floor, cur, prop, { threshold: 150, angleTol: 30 });
@@ -2195,9 +2834,19 @@
   }
 
   // ================================================================== render loop
+  /** Haze starts beyond the house whatever the zoom, and always hides the edge of the ground. */
+  function updateFog() {
+    const fog = S.scene.fog;
+    if (!fog) return;
+    const dist = !isWalking() && S.orbit ? S.camera.position.distanceTo(S.orbit.target) : 0;
+    const near = Math.max(FOG.near, dist * 1.15);
+    fog.near = near;
+    fog.far = Math.min(FOG.max, near + (FOG.far - FOG.near));
+  }
   function render() {
     S.needsRender = false;
     S.sky.position.copy(S.camera.position);
+    updateFog();
     S.renderer.render(S.scene, S.camera);
   }
   function frame(now) {
@@ -2232,7 +2881,7 @@
   }
   /** Finish a running camera tween immediately (e.g. the view is hidden mid-transition). */
   function completeTween() {
-    if (S.tween) stepTween(S.tween.t0 + S.tween.ms + 1);
+    if (S.tween) stepTween(0, true);
   }
 
   function setActive(on) {
@@ -2241,6 +2890,7 @@
     if (S.active) {
       resize();
       if (S.pendingAerial && !S.tween) jumpHome();
+      if (S.cutaway && !S.tween) setCutaway(false, false);
       requestRender();
       startLoop();
     } else {
@@ -2287,7 +2937,20 @@
   function markAllFloors(doc) {
     doc.floors.forEach((f) => S.dirty.floors.add(f.id));
   }
-  function onDocChange(doc, prev) {
+  /** A 3D furniture drag whose gesture was cancelled elsewhere (undo, floor change, import) must stop at once. */
+  function abortDragIfCancelled(info) {
+    if (!S.drag || !info || !(info.undo || info.redo || info.replaced || info.cancel)) return;
+    S.drag = null;
+    S.press = null;
+    if (S.orbit && !isWalking() && !S.tween) S.orbit.enabled = true;
+    setCursor('');
+    S.dirty.highlight = true;
+  }
+  function onDocChange(doc, prev, info) {
+    abortDragIfCancelled(info);
+    const transient = !!(info && info.transient && store().inGesture());
+    const pending = S.dirty.floors.size > 0;
+    S.dirty.transient = transient && (!pending || S.dirty.transient);
     if (!prev || doc.floors !== prev.floors) {
       markAllFloors(doc);
       S.dirty.furniture = true;
@@ -2308,6 +2971,8 @@
   function onUIChange(ui, prev) {
     if (ui.selection !== prev.selection || ui.hover !== prev.hover) S.dirty.highlight = true;
     if (ui.showAllFloors !== prev.showAllFloors || ui.show !== prev.show) S.dirty.visibility = true;
+    if (ui.showAllFloors !== prev.showAllFloors && S.ready && S.active && S.atHome && !S.tween && !isWalking())
+      tweenCamera(currentPose(), aerialHome(), 600, { home: true }); // re-frame: with or without the upper floors
     if (ui.floor !== prev.floor) onFloorChange(ui.floor);
     if (ui.cam3d !== prev.cam3d) applyCameraMode(ui.cam3d);
     requestRender();
@@ -2426,6 +3091,58 @@
     updateWalkUI();
     if (DD.events) DD.events.emit('view3d:ready', {});
     if (S.active) setActive(true);
+    scheduleWarmUp();
+  }
+  /**
+   * Pre-compile every shader program (all floors, roof, shadow pass) and upload the GPU buffers while the user is
+   * still in 2D, so the first 2D→3D transition does not stall on its first frames.
+   */
+  function scheduleWarmUp() {
+    const idle = window.requestIdleCallback ? (fn) => window.requestIdleCallback(fn, { timeout: 1500 }) : (fn) => setTimeout(fn, 200);
+    idle(() => {
+      if (!S.ready || S.warm) return;
+      const r = S.renderer;
+      const run = () => {
+        if (!S.ready || S.warm) return;
+        S.warm = true;
+        try {
+          flushRebuild();
+          withEverythingVisible(() => (S.active ? r.compile(S.scene, S.camera) : render()));
+        } catch (e) {
+          console.warn('[view3d] shader warm-up failed', e);
+        }
+        requestRender();
+      };
+      if (typeof r.compileAsync === 'function')
+        withEverythingVisible(() => r.compileAsync(S.scene, S.camera))
+          .then(() => idle(run))
+          .catch((e) => {
+            console.warn('[view3d] async shader compile failed', e);
+            run();
+          });
+      else run();
+    });
+  }
+  /** Run fn with every floor, roof and furniture group visible; the previous visibility is restored afterwards. */
+  function withEverythingVisible(fn) {
+    const saved = [];
+    const show = (o) => {
+      if (!o) return;
+      saved.push([o, o.visible]);
+      o.visible = true;
+    };
+    S.floors.forEach((fg) => {
+      show(fg.root);
+      show(fg.roof);
+      show(fg.furn);
+    });
+    try {
+      return fn();
+    } finally {
+      saved.forEach((e) => {
+        e[0].visible = e[1];
+      });
+    }
   }
   function teardown() {
     stopLoop();

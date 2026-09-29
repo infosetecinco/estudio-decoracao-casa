@@ -6,6 +6,8 @@
 <title>Estúdio de Decoração — Casa</title>
 <meta name="description" content="Ferramenta de decoração em 2D e 3D sobre a planta aprovada de uma casa (3 pavimentos, lote 9 × 20 m).">
 <meta name="color-scheme" content="dark light">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='.5' y='.5' width='27' height='27' rx='7' fill='%23E0703F'/%3E%3Cpath d='M6.5 13.2 14 7l7.5 6.2V21H6.5z' fill='none' stroke='%231C0F08' stroke-width='1.8' stroke-linejoin='round'/%3E%3Cpath d='M11.8 21v-4.6h4.4V21' fill='none' stroke='%231C0F08' stroke-width='1.8' stroke-linejoin='round'/%3E%3Cpath d='M4 24h20' stroke='%231C0F08' stroke-width='1.2' stroke-linecap='round' stroke-dasharray='1.6 1.6'/%3E%3C/svg%3E">
+<script>/* theme chosen in the ⋯ menu, applied before first paint (key shared with 40-ui.js) */try{var t=localStorage.getItem('dd.decor.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap">
@@ -71,6 +73,7 @@
           <button type="button" class="menu-item only-compact-item" role="menuitem" data-action="export-json"><span class="ic" data-icon="file"></span><span>Exportar projeto .json</span></button>
           <div class="menu-sep only-compact-item" role="separator"></div>
           <button type="button" class="menu-item" role="menuitem" data-action="import"><span class="ic" data-icon="upload"></span><span>Importar .json</span></button>
+          <button type="button" class="menu-item" role="menuitem" data-action="restore-backup" hidden><span class="ic" data-icon="reset"></span><span>Recuperar projeto anterior</span><span class="menu-meta"></span></button>
           <button type="button" class="menu-item" role="menuitem" data-action="reset"><span class="ic" data-icon="reset"></span><span>Restaurar projeto original</span></button>
           <div class="menu-sep" role="separator"></div>
           <button type="button" class="menu-item" role="menuitem" data-action="theme"><span class="ic" data-icon="theme"></span><span id="theme-label">Tema claro</span></button>
@@ -88,7 +91,7 @@
 
     <aside class="library" id="library" aria-labelledby="library-title">
       <div class="panel-head">
-        <h2 class="panel-title" id="library-title">Biblioteca de móveis</h2>
+        <h2 class="panel-title" id="library-title" tabindex="-1">Biblioteca de móveis</h2>
         <span class="panel-count num" id="lib-count"></span>
         <button type="button" class="icon-btn only-narrow" data-close-drawer aria-label="Fechar biblioteca"><span class="ic" data-icon="close"></span></button>
       </div>
@@ -106,9 +109,9 @@
 
     <main class="stage" id="stage" data-view="2d">
       <section class="view" id="view2d" aria-label="Planta 2D">
-        <canvas id="plan-canvas" aria-label="Planta do pavimento" role="img"></canvas>
+        <div class="paint-strip" id="paint-strip" role="toolbar" aria-label="Revestimento de piso" hidden></div>
+        <div class="plan-host" id="plan-host"><canvas id="plan-canvas" aria-label="Planta do pavimento" role="img"></canvas></div>
         <div class="drop-hint" aria-hidden="true">Solte para posicionar o móvel</div>
-        <div class="paint-strip float" id="paint-strip" role="toolbar" aria-label="Revestimento de piso" hidden></div>
       </section>
       <div class="split-divider" id="split-divider" role="separator" aria-orientation="vertical" aria-label="Redimensionar vistas 2D e 3D" aria-valuemin="20" aria-valuemax="80" aria-valuenow="50" tabindex="-1"></div>
       <section class="view" id="view3d" aria-label="Vista 3D">
@@ -118,9 +121,9 @@
 
     <aside class="inspector" id="inspector" aria-labelledby="inspector-title">
       <div class="panel-head">
-        <h2 class="panel-title" id="inspector-title">Projeto</h2>
+        <h2 class="panel-title" id="inspector-title" tabindex="-1">Projeto</h2>
         <span class="panel-count" id="inspector-kind"></span>
-        <button type="button" class="icon-btn" id="btn-clear-selection" aria-label="Limpar seleção" data-tip="Limpar seleção" data-key="Esc" hidden><span class="ic" data-icon="close"></span></button>
+        <button type="button" class="btn btn-ghost btn-sm btn-clear" id="btn-clear-selection" data-tip="Limpar a seleção" data-key="Esc" hidden><span class="ic ic-sm" data-icon="close"></span><span>Limpar seleção</span></button>
         <button type="button" class="icon-btn only-narrow" data-close-drawer aria-label="Fechar inspetor"><span class="ic" data-icon="chevronRight"></span></button>
       </div>
       <div class="inspector-body" id="inspector-body" aria-live="off"></div>
@@ -135,20 +138,20 @@
       <span class="status-tool" id="status-tool"></span>
       <span class="status-hint status-optional" id="status-hint"></span>
     </div>
-    <div class="status-group">
+    <div class="status-group status-2d">
       <span class="status-coords num" id="status-coords" aria-label="Posição do cursor">x —  · y —</span>
     </div>
-    <div class="status-group status-optional">
+    <div class="status-group status-optional status-2d">
       <button type="button" class="icon-btn" id="btn-zoom-out" aria-label="Diminuir zoom" data-tip="Diminuir zoom" data-key="−" data-tip-pos="top"><span class="ic" data-icon="minus"></span></button>
       <span class="status-zoom num" id="status-zoom" title="Zoom relativo à escala 1:100">—</span>
       <button type="button" class="icon-btn" id="btn-zoom-in" aria-label="Aumentar zoom" data-tip="Aumentar zoom" data-key="+" data-tip-pos="top"><span class="ic" data-icon="plus"></span></button>
       <button type="button" class="icon-btn" id="btn-fit" aria-label="Enquadrar pavimento" data-tip="Enquadrar pavimento" data-key="0" data-tip-pos="top"><span class="ic" data-icon="fit"></span></button>
     </div>
     <div class="status-group status-optional" role="group" aria-label="Exibição">
-      <button type="button" class="chip" id="tg-snap" aria-pressed="true" data-tip="Móveis aderem às paredes (Alt desliga durante o arraste)" data-tip-pos="top"><span class="ic" data-icon="magnet"></span>Adsorção</button>
-      <button type="button" class="chip" id="tg-grid" aria-pressed="true" data-tip="Grade" data-key="G" data-tip-pos="top"><span class="ic" data-icon="grid"></span>Grade</button>
-      <button type="button" class="chip" id="tg-dims" aria-pressed="true" data-tip="Cotas automáticas" data-tip-pos="top"><span class="ic" data-icon="dims"></span>Cotas</button>
-      <button type="button" class="chip" id="tg-labels" aria-pressed="true" data-tip="Nomes e áreas dos ambientes" data-tip-pos="top"><span class="ic" data-icon="tag"></span>Rótulos</button>
+      <button type="button" class="chip" id="tg-snap" aria-label="Adsorção às paredes" aria-pressed="true" data-tip="Móveis aderem às paredes (Alt desliga durante o arraste)" data-tip-pos="top"><span class="ic" data-icon="magnet"></span><span class="chip-label">Adsorção</span></button>
+      <button type="button" class="chip status-2d" id="tg-grid" aria-label="Grade" aria-pressed="true" data-tip="Grade" data-key="G" data-tip-pos="top"><span class="ic" data-icon="grid"></span><span class="chip-label">Grade</span></button>
+      <button type="button" class="chip status-2d" id="tg-dims" aria-label="Cotas automáticas" aria-pressed="true" data-tip="Cotas automáticas" data-tip-pos="top"><span class="ic" data-icon="dims"></span><span class="chip-label">Cotas</span></button>
+      <button type="button" class="chip status-2d" id="tg-labels" aria-label="Rótulos dos ambientes" aria-pressed="true" data-tip="Nomes e áreas dos ambientes" data-tip-pos="top"><span class="ic" data-icon="tag"></span><span class="chip-label">Rótulos</span></button>
     </div>
     <div class="status-group">
       <span class="save-state" id="save-state" data-state="idle" role="status"><span class="save-dot" aria-hidden="true"></span><span id="save-text">Autossalvamento ativo</span></span>

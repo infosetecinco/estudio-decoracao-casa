@@ -20,8 +20,8 @@ const F = DD.furniture3d;
 const TYPES = F._internal.FALLBACK_TYPES;
 
 const TOL = 0.03; // m
-// Parts allowed above the nominal height (m): faucets on sink/vanity.
-const HEIGHT_ALLOWANCE = { kitchenSink: 0.3, basin: 0.2 };
+// Parts allowed above the nominal height (m): faucets on sink/vanity, wall tap above the tanque.
+const HEIGHT_ALLOWANCE = { kitchenSink: 0.3, basin: 0.2, tanque: 0.22 };
 const TRI_BUDGET = (type) => (type === 'car' ? 6000 : 3000);
 const SCALES = [
   { name: '1x', k: [1, 1, 1] },
@@ -114,6 +114,14 @@ function orientationChecks() {
   check(fridge.door && fridge.door.max[2] > 0.25, 'fridge: portas em +Z');
   const bike = parts('bike');
   check(bike.handlebar && centre(bike.handlebar)[2] > 0 && centre(bike.saddle)[2] < centre(bike.handlebar)[2], 'bike: guidão à frente (+Z)');
+  const tq = parts('tanque');
+  check(tq.washboard && tq.drain && tq.tap && tq.pedestal, 'tanque: partes washboard/drain/tap/pedestal');
+  if (tq.washboard && tq.drain && tq.tap) {
+    check(centre(tq.washboard)[2] > 0 && tq.washboard.min[2] > tq.drain.max[2], 'tanque: esfregador na metade frontal (+Z), ralo atrás dele');
+    check(tq.drain.max[1] < tq.washboard.min[1] + 0.01, 'tanque: ralo no fundo da cuba');
+    check(tq.tap.min[2] >= -0.275 - 0.001 && centre(tq.tap)[2] < 0, 'tanque: torneira na parede de trás (-Z)');
+    check(tq.tap.min[1] > 0.9 && Math.abs(centre(tq.tap)[2] - centre(tq.drain)[2]) < 0.09, 'tanque: torneira acima da borda, sobre a cuba');
+  }
   const shower = parts('shower');
   check(shower.showerHead && centre(shower.showerHead)[1] > 1.5, 'shower: chuveiro no alto');
 }

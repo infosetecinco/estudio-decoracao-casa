@@ -97,19 +97,6 @@ test('thicknessEdit: 70–250 mm', () => {
   assert.ok(U.thicknessEdit(wall, '251').error);
 });
 
-test('openingWidthEdit keeps the opening inside the wall and clear of siblings', () => {
-  const op = { id: 'o1', t: 500, width: 700 };
-  const res = U.openingWidthEdit(op, 3000, '900', [op]);
-  assert.deepStrictEqual(res, { patch: { width: 900, t: 500 } });
-  const near = U.openingWidthEdit({ id: 'o1', t: 400, width: 700 }, 3000, '1000', []);
-  assert.strictEqual(near.patch.t, 500); // pushed inside the wall
-  assert.ok(U.openingWidthEdit(op, 3000, '300', [op]).error);
-  assert.ok(U.openingWidthEdit(op, 3000, '3200', [op]).error);
-  const sib = { id: 'o2', t: 1300, width: 800 };
-  assert.ok(U.openingWidthEdit(op, 3000, '1200', [op, sib]).error.indexOf('sobreposta') >= 0);
-  assert.deepStrictEqual(U.openingWidthEdit(op, 3000, '700', [op]), { noop: true });
-});
-
 test('findFreeT prefers the middle and avoids openings', () => {
   assert.strictEqual(U.findFreeT(3000, [], 700), 1500);
   // middle occupied → nearest free gap
@@ -119,7 +106,9 @@ test('findFreeT prefers the middle and avoids openings', () => {
   assert.ok(t - 350 >= 100 && t + 350 <= 3900, 'inside wall margins: ' + t);
   // no room at all
   assert.strictEqual(U.findFreeT(800, [], 700), null);
-  assert.strictEqual(U.findFreeT(2000, [{ t: 1000, width: 1600 }], 700), null);
+  assert.strictEqual(U.findFreeT(2000, [{ t: 1000, width: 1600 }], 700), null);  // with a joint-aware span
+  assert.strictEqual(U.findFreeT(3000, [], 700, 100, { lo: 125, hi: 2900 }), 1500);
+  assert.strictEqual(U.findFreeT(1000, [], 800, 100, { lo: 125, hi: 875 }), null);
 });
 
 test('findFreeT on a real partition (Térreo cozinha/quarto) with DD.ops.addOpening', () => {
@@ -231,6 +220,106 @@ test('nudgeDelta', () => {
   assert.deepStrictEqual(U.nudgeDelta('ArrowRight', false), { dx: 10, dy: 0 });
   assert.deepStrictEqual(U.nudgeDelta('ArrowUp', true), { dx: 0, dy: -100 });
   assert.strictEqual(U.nudgeDelta('a', false), null);
+});
+
+test('openingWidthEdit keeps the opening inside the wall and clear of siblings', () => {
+  const op = { id: 'o1', t: 1500, width: 700, style: 'swing', type: 'door' };
+  assert.deepStrictEqual(U.openingWidthEdit(op, 3000, '900', [op]), { patch: { width: 900, t: 1500 } });
+  // near the wall end → the centre moves just enough to keep OPENING_CLEARANCE (100 mm) from the end
+  const near = U.openingWidthEdit({ ...op, t: 400 }, 3000, '1000', []);
+  assert.strictEqual(near.patch.t, 600);
+  assert.ok(U.openingWidthEdit(op, 3000, '300', [op]).error);
+  assert.deepStrictEqual(U.openingWidthEdit(op, 3000, '700', [op]), { noop: true });
+  // sibling at 2400 (800 wide): 100 mm must stay free between the two openings → right limit 1900
+  const sib = { id: 'o2', t: 2400, width: 800, style: 'swing', type: 'door' };
+  assert.deepStrictEqual(U.openingWidthEdit(op, 3000, '1100', [op, sib]), { patch: { width: 1100, t: 1350 } });
+  const blocked = U.openingWidthEdit({ ...op, style: 'slide4' }, 3000, '2200', [op, sib]);
+  assert.ok(blocked.error.indexOf('1.800') >= 0, blocked.error); // 1900 − 100
+});
+
+test('openingWidthEdit caps each style at a sensible width (qaui#1)', () => {
+  const door = { id: 'o1', t: 2000, width: 700, style: 'swing', type: 'door' };
+  const e1 = U.openingWidthEdit(door, 4000, '3900', [door], { lo: 125, hi: 3875 });
+  assert.ok(e1.error && e1.error.indexOf('1.200') >= 0, e1.error);
+  assert.deepStrictEqual(U.openingWidthEdit(door, 4000, '1200', [door], { lo: 125, hi: 3875 }), { patch: { width: 1200, t: 2000 } });
+  const slide4 = { ...door, style: 'slide4' };
+  const e2 = U.openingWidthEdit(slide4, 4000, '3900', [slide4], { lo: 125, hi: 3875 });
+  assert.ok(e2.error && e2.error.indexOf('3.750') >= 0, e2.error); // free span 3875 − 125
+  assert.deepStrictEqual(U.openingWidthEdit(slide4, 4000, '3750', [slide4], { lo: 125, hi: 3875 }), { patch: { width: 3750, t: 2000 } });
+  const win = { id: 'w', t: 4000, width: 1000, style: 'slide2', type: 'window' };
+  assert.ok(U.openingWidthEdit(win, 8000, '3200', [win]).error.indexOf('janela') >= 0);
+});
+
+test('wallFreeSpan: joints with other walls reduce the clear span (qaui#1 repro wall)', () => {
+  const doc = DD.data.initialState();
+  const w = DD.ops.byId(doc, 'walls', 'w0_cozQuarto');
+  const L = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y);
+  const span = U.wallFreeSpan(doc, w);
+  assert.ok(span.lo >= 100 && span.hi <= L - 100, JSON.stringify(span));
+  assert.ok(span.hi - span.lo < L - 200, 'joints detected: ' + JSON.stringify(span) + ' L=' + L);
+  const op = { id: 'x', wall: w.id, t: L / 2, width: 700, style: 'swing', type: 'door' };
+  assert.ok(U.openingWidthEdit(op, L, '3900', [op], span).error);
+  // a free-standing wall keeps the plain 100 mm end clearance
+  const lone = { id: 'lone', floor: 'f9', a: { x: 0, y: 0 }, b: { x: 3000, y: 0 }, thick: 100 };
+  assert.deepStrictEqual(U.wallFreeSpan({ walls: [lone] }, lone), { lo: 100, hi: 2900 });
+  // L-corner with a 150 mm wall at `a`: 75 mm covered + 50 mm jamb
+  const corner = { id: 'c', floor: 'f9', a: { x: 0, y: 0 }, b: { x: 0, y: 2000 }, thick: 150 };
+  assert.deepStrictEqual(U.wallFreeSpan({ walls: [lone, corner] }, lone), { lo: 125, hi: 2900 });
+  // a thick 300 mm wall crossing at `b` (T-joint): 150 mm covered + 50 mm jamb
+  const tee = { id: 't', floor: 'f9', a: { x: 3000, y: -1000 }, b: { x: 3000, y: 1000 }, thick: 300 };
+  assert.deepStrictEqual(U.wallFreeSpan({ walls: [lone, tee] }, lone), { lo: 100, hi: 2800 });
+  // a colinear continuation is not a joint; walls of other floors are ignored
+  const cont = { id: 'k', floor: 'f9', a: { x: 3000, y: 0 }, b: { x: 5000, y: 0 }, thick: 100 };
+  const other = { ...corner, id: 'o', floor: 'f8' };
+  assert.deepStrictEqual(U.wallFreeSpan({ walls: [lone, cont, other] }, lone), { lo: 100, hi: 2900 });
+});
+
+test('parseLength / parseMM accept typed units (qaui#14)', () => {
+  assert.strictEqual(U.parseMM('2,5m'), 2500);
+  assert.strictEqual(U.parseMM('2,5 m'), 2500);
+  assert.strictEqual(U.parseMM('250cm'), 2500);
+  assert.strictEqual(U.parseMM('2500 mm'), 2500);
+  assert.strictEqual(U.parseMM('1.200 mm'), 1200);
+  assert.strictEqual(U.parseMeters('425 cm'), 4250);
+  assert.strictEqual(U.parseMeters('4250mm'), 4250);
+  assert.strictEqual(U.parseMeters('1.200'), 1200); // metres: a dot is a decimal point
+  assert.ok(Number.isNaN(U.parseMM('90°')));
+  assert.ok(Number.isNaN(U.parseMM('m')));
+  assert.deepStrictEqual(U.furnitureEdit(item, 'w', '2,5m', lot), { patch: { w: 2500 } });
+  assert.deepStrictEqual(U.furnitureEdit(item, 'x', '425cm', lot), { patch: { x: 4250 } });
+  const bare = U.furnitureEdit(item, 'w', '2,5', lot).error;
+  assert.ok(bare.indexOf('2,5 m') >= 0 && bare.indexOf('2500') >= 0, bare);
+  assert.ok(U.furnitureEdit(item, 'w', 'abc', lot).error.indexOf('2,5 m') >= 0);
+});
+
+test('punctuate / fmtSavedAt / viewportShowsBox', () => {
+  assert.strictEqual(U.punctuate('Projeto salvo neste navegador'), 'Projeto salvo neste navegador.');
+  assert.strictEqual(U.punctuate('Planta exportada em PNG.'), 'Planta exportada em PNG.');
+  assert.strictEqual(U.punctuate('Carregando…'), 'Carregando…');
+  assert.strictEqual(U.punctuate(''), '');
+  const now = new Date(2026, 8, 29, 18, 0);
+  assert.strictEqual(U.fmtSavedAt(new Date(2026, 8, 29, 9, 5), now), '09:05');
+  assert.strictEqual(U.fmtSavedAt(new Date(2026, 8, 28, 9, 5), now), '28/09 09:05');
+  assert.strictEqual(U.fmtSavedAt(new Date(2026, 8, 29, 9, 5), now, true), '29/09/2026 09:05');
+  assert.strictEqual(U.fmtSavedAt('nope', now), '');
+  const box = { minX: 0, minY: 0, maxX: 9000, maxY: 14000 };
+  const vp = { cx: 4500, cy: 7000, scale: 0.05, width: 800, height: 800 }; // 450 × 700 px
+  assert.strictEqual(U.viewportShowsBox(vp, box), true);
+  assert.strictEqual(U.viewportShowsBox({ ...vp, width: 400 }, box), false);
+  assert.strictEqual(U.viewportShowsBox({ ...vp, scale: 0.1 }, box), false);
+  assert.strictEqual(U.viewportShowsBox(null, box), false);
+});
+
+test('wall kind notes read the real heights (ground muros 2,00 m, terrace muros 1,80 m)', () => {
+  assert.ok(U.WALL_KIND.muro.note({ height: 2000 }).indexOf('2,00 m') >= 0);
+  assert.ok(U.WALL_KIND.muro.note({ height: 1800 }).indexOf('1,80 m') >= 0);
+  assert.ok(U.WALL_KIND.railing.note({ height: 1100, mureta: 800 }).indexOf('0,80 m') >= 0);
+  assert.ok(U.WALL_KIND.railing.note({ height: 1200 }).indexOf('0,30 m') >= 0);
+  assert.ok(U.WALL_KIND.railing.note({ height: 1000, mureta: 0 }).indexOf('sem mureta') >= 0);
+});
+
+test('keyToAction: Ctrl+S maps to save even with Shift off', () => {
+  assert.deepStrictEqual(U.keyToAction(key('S', { ctrlKey: true })), { type: 'save' });
 });
 
 if (failures.length) {

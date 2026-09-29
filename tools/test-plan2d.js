@@ -224,11 +224,26 @@ test('solidIntervals & cut plane', () => {
   ok(T.cutsWall({ type: 'window', sill: 1100 }));
   ok(!T.cutsWall({ type: 'window', sill: 1800 }), 'high window above the cut plane');
 });
-test('openingRange respects wall ends and neighbours', () => {
+test('openingRange respects wall ends, walls at its joints and neighbours', () => {
   const w = DD.ops.byId(baseDoc, 'walls', 'w0_back'); // L = 6000, openings at 2125 (P1 800), 3170 (J1 600), 4450 (J1 600)
   const op = DD.ops.byId(baseDoc, 'openings', 'o0_j1_desp');
   const r = T.openingRange(baseDoc, op, w);
-  eq(r.lo, 2125 + 400 + 300); eq(r.hi, 4450 - 300 - 300);
+  // partitions butting into w0_back: w0_cozDesp x 4150–4300 (s 2650–2800), w0_despSuiteDiv x 5400–5550 (s 3900–4050)
+  eq(r.lo, 2800 + 300); eq(r.hi, 3900 - 300);
+  // P2 on w0_despSuite (a = joint with w0_cozDesp/w0_cozQuarto, 150 thick): jamb stops at the inner face x = 4300
+  const ds = DD.ops.byId(baseDoc, 'walls', 'w0_despSuite');
+  const p2 = DD.ops.byId(baseDoc, 'openings', 'o0_p2_suite');
+  eq(T.openingRange(baseDoc, Object.assign({}, p2, { t: 500 }), ds).lo, 75 + 350, 'clear of the crossing wall');
+  eq(T.openingRange(baseDoc, p2, ds).hi, 3125 - 350, 'clear of w0_right at the b end');
+  const obs = T.wallObstacles(baseDoc, ds).map((o) => o.map(Math.round).join('-')).sort();
+  ok(obs.indexOf('0-75') >= 0 && obs.indexOf('1175-1325') >= 0 && obs.indexOf('3125-3200') >= 0, JSON.stringify(obs));
+});
+test('jointOpeningClash: a partition end may not butt into a door or window of another wall', () => {
+  // w0_right (x 7425, from y 2850) has J2 at t 3000 ± 1000 → y 4850–6850
+  eq(T.jointOpeningClash(baseDoc, 'f0', { x: 7425, y: 4675 }, 150, 'w0_despSuite'), null);
+  eq(T.jointOpeningClash(baseDoc, 'f0', { x: 7425, y: 4975 }, 150, 'w0_despSuite').id, 'o0_j2_quarto');
+  eq(T.jointOpeningClash(baseDoc, 'f0', { x: 7425, y: 4775 }, 150, 'w0_despSuite'), null, 'touching the jamb is fine');
+  eq(T.jointOpeningClash(baseDoc, 'f0', { x: 6000, y: 6000 }, 150, 'x'), null, 'free end');
 });
 test('retargetOpenings keeps openings fixed in world space when wall.a moves', () => {
   const w = DD.ops.byId(baseDoc, 'walls', 'w0_cozDesp'); // x=4225, y 2925→4675, P6 at t=1250
@@ -253,10 +268,11 @@ test('scale bar & labels', () => {
   const lines2 = T.roomLabelLines({ name: 'Sala', area: 26.33, planArea: 29.6, open: false }, true, true);
   eq(lines2[1].text, 'A=26,33 m²'); eq(lines2[2].text, '(projeto 29,60)');
 });
-test('stairsForFloor: up on T and 1º, arriving (down) only on 2º', () => {
-  eq(T.stairsForFloor(baseDoc, 0).map((s) => s.st.id + ':' + s.mode).join(), 'st0:up');
-  eq(T.stairsForFloor(baseDoc, 1).map((s) => s.st.id + ':' + s.mode).join(), 'st1:up');
-  eq(T.stairsForFloor(baseDoc, 2).map((s) => s.st.id + ':' + s.mode).join(), 'st1:down');
+test('stairsForFloor: S on T; S + D (label only) on 1º like the PDF; D on 2º', () => {
+  const tag = (s) => s.st.id + ':' + s.mode + (s.labelOnly ? '*' : '');
+  eq(T.stairsForFloor(baseDoc, 0).map(tag).join(), 'st0:up');
+  eq(T.stairsForFloor(baseDoc, 1).map(tag).join(), 'st1:up,st0:down*');
+  eq(T.stairsForFloor(baseDoc, 2).map(tag).join(), 'st1:down');
 });
 test('opening tag side: windows outside, doors opposite the swing', () => {
   const back = DD.ops.byId(baseDoc, 'walls', 'w0_back');
@@ -279,6 +295,74 @@ test('backToWallRotation picks the rotation with the back on the nearest face', 
   eq(T.backToWallRotation(baseDoc, 'f0', { x: 8500, y: 12000 }, 800), 90, 'right wall');
   eq(T.backToWallRotation(baseDoc, 'f0', { x: 6000, y: 14600 }, 800), 180, 'front wall');
   eq(T.backToWallRotation(baseDoc, 'f0', { x: 6000, y: 12500 }, 800), null, 'room centre');
+});
+
+test('snapWallPoint (measure): visible room corners, never corners buried in joints', () => {
+  const snap = (x, y, tol) => T.snapWallPoint(baseDoc, 'f0', { x, y }, { tol, grid: 0, visibleOnly: true });
+  const eqPt = (r, x, y, msg) => { eq(r.x, x, msg + ' x'); eq(r.y, y, msg + ' y'); };
+  eqPt(snap(4340, 4790, 205), 4300, 4750, 'Quarto top-left (T joint of two partitions)');
+  eqPt(snap(7320, 4800, 205), 7350, 4750, 'Quarto top-right');
+  eqPt(snap(1642, 3008, 205), 1650, 3000, 'Cozinha top-left');
+  eqPt(snap(7330, 8590, 205), 7350, 8600, 'Quarto bottom-right');
+  eqPt(snap(4308, 4745, 25), 4300, 4750, 'exact corner available when zoomed in');
+  eqPt(snap(1510, 2860, 100), 1500, 2850, 'outer building corner');
+  const pts = T.floorSnapPoints(baseDoc, 'f0');
+  ok(!pts.some((p) => p.kind === 'corner' && p.x === 4225 && p.y === 4750), 'polygon corner inside w0_cozQuarto dropped');
+  ok(!pts.some((p) => p.kind === 'corner' && p.x === 1500 && p.y === 3000), 'point on a straight face is not a corner');
+  ok(pts.some((p) => p.kind === 'corner' && p.x === 3225 && p.y === 8750), 'door jamb corner (P1 cozinha)');
+  const e = T.snapWallPoint(baseDoc, 'f0', { x: 4240, y: 4690 }, { tol: 100, grid: 50 });
+  eq(e.kind, 'end', 'the wall tool still snaps to joint centres');
+  const b = T.snapWallPoint(baseDoc, 'f0', { x: -9000, y: 30000 }, { tol: 0, grid: 50, bounds: T.wallToolBounds(baseDoc) });
+  eq(b.x, -5000); eq(b.y, 25000);
+});
+test('hitTestSelect follows the draw order: measures > walls/openings (exact) > furniture > tolerant hits', () => {
+  const doc = Object.assign({}, baseDoc, {
+    furniture: [
+      { id: 'cab', floor: 'f0', type: 'sofa', x: 4800, y: 6000, rot: 90, w: 1000, d: 900, h: 800 }, // flush with the partition face x=4300
+      { id: 'rug', floor: 'f0', type: 'tapete', x: 6500, y: 11000, rot: 0, w: 2000, d: 1400, h: 10 },
+    ],
+    measures: [{ id: 'm1', floor: 'f0', a: { x: 5000, y: 11000 }, b: { x: 8000, y: 11000 } }],
+  });
+  const px = 20.5; // fit zoom (0.0487 px/mm)
+  eq(T.hitTestSelect(doc, 'f0', { x: 4225, y: 6000 }, px).id, 'w0_cozQuarto', 'wall poché over a cabinet');
+  eq(T.hitTestSelect(doc, 'f0', { x: 4310, y: 6000 }, px).id, 'cab', 'just inside the room: the cabinet');
+  eq(T.hitTestSelect(doc, 'f0', { x: 6500, y: 11000 }, px).kind, 'measure', 'measure over a rug');
+  const label = T.hitTestSelect(doc, 'f0', { x: 6500, y: 11000 - 13 * px }, px);
+  eq(label.kind, 'measure', 'measure label pill');
+  eq(T.hitTestSelect(doc, 'f0', { x: 6500, y: 11500 }, px).id, 'rug');
+});
+test('fitLabelText wraps long room names to two lines and ellipsizes the rest', () => {
+  const m = (s) => s.length * 7;
+  eq(JSON.stringify(T.fitLabelText(m, 'Sala', 100, 2)), JSON.stringify(['Sala']));
+  eq(JSON.stringify(T.fitLabelText(m, 'Quarto de hóspedes', 100, 2)), JSON.stringify(['Quarto de', 'hóspedes']));
+  const long = T.fitLabelText(m, 'Quarto de hóspedes com closet e escritório integrado', 100, 2);
+  eq(long.length, 2);
+  ok(long.every((l) => m(l) <= 100), JSON.stringify(long));
+  ok(/…$/.test(long[1]), 'ellipsized');
+  eq(T.fitLabelText(m, 'Superlongonomesemespaços', 70, 1)[0], 'Superlong…');
+});
+test('findLabelSpot: nearest clear spot inside the room, seed when nothing fits', () => {
+  const room = { labelX: 5000, labelY: 5000, outer: [{ x: 3000, y: 3000 }, { x: 7000, y: 3000 }, { x: 7000, y: 7000 }, { x: 3000, y: 7000 }], holes: [], bbox: { minX: 3000, minY: 3000, maxX: 7000, maxY: 7000 } };
+  const clear = T.findLabelSpot(room, { x: 5000, y: 5000 }, 800, 400, []);
+  eq(clear.x, 5000); eq(clear.y, 5000);
+  const bed = { minX: 4000, minY: 4200, maxX: 6000, maxY: 6400 };
+  const s = T.findLabelSpot(room, { x: 5000, y: 5000 }, 800, 400, [bed]);
+  ok(s && T.labelBoxFree(room, s, 800, 400, [bed]), 'free');
+  ok(Math.abs(s.y - 5000) <= 1700, 'stays close ' + JSON.stringify(s));
+  eq(T.findLabelSpot(room, { x: 5000, y: 5000 }, 5000, 400, []), null, 'label wider than the room');
+});
+test('export title does not claim a print scale; footer fits the schedule', () => {
+  eq(T.stripScaleClaim('Planta aprovada 01/01 (esc. 1:100)'), 'Planta aprovada 01/01');
+  eq(T.stripScaleClaim('Levantamento — escala 1:50'), 'Levantamento —');
+  const l = T.exportFooterLayout(1092, 9);
+  ok(l.cols >= 3 && l.rows >= 4 && l.rows * l.cols >= 9, JSON.stringify(l));
+  const box = T.exportBox(baseDoc, 'f0');
+  eq(box.maxY, 16200, 'the export stops at the building, not the street');
+});
+test('dimension chains wrap the terrace on the 2º pav', () => {
+  const dd = DD.geom.dimensionData(baseDoc, 'f2');
+  const e = T.dimensionEdges(baseDoc, 'f2', dd);
+  ok(e.maxY >= 15000, 'bottom edge below the terrace muros ' + e.maxY);
 });
 
 // ------------------------------------------------------------------ renderer smoke tests
@@ -404,19 +488,27 @@ e2e('select: structural wall is locked (toast once), partition moves perpendicul
   eq(events.filter((e) => e[0] === 'toast' && e[2] === 'Parede estrutural — bloqueada').length, 1);
   eq(DD.ops.byId(st().doc, 'walls', 'w0_left').a.x, 1575);
   const docBefore = st().doc;
+  events.length = 0;
   down({ x: 5475, y: 3800 }); // w0_despSuiteDiv partition (vertical, between Desp. and Suíte)
-  move({ x: 5600, y: 3800 });
-  move({ x: 5678, y: 3900 });
-  ok(S.feedback && /Deslocamento 0,20 m/.test(S.feedback.label.text), 'offset label ' + (S.feedback && S.feedback.label.text));
+  move({ x: 5540, y: 3800 });
+  move({ x: 5578, y: 3900 });
+  ok(S.feedback && /Deslocamento 0,10 m/.test(S.feedback.label.text), 'offset label ' + (S.feedback && S.feedback.label.text));
   ok(S.feedback.rays.length === 2, 'distances to both neighbours');
-  up({ x: 5678, y: 3900 });
+  // 200 mm would put the joint with w0_back into window J1 of the Suíte (x 5650–6250): clamped, warned once
+  move({ x: 5678, y: 3900 });
+  move({ x: 5700, y: 3900 });
+  eq(DD.ops.byId(st().doc, 'walls', 'w0_despSuiteDiv').a.x, 5575, 'clamped before the window');
+  eq(events.filter((e) => e[0] === 'toast' && /abertura J1/.test(e[2])).length, 1, 'one warning');
+  up({ x: 5700, y: 3900 });
   const w = DD.ops.byId(st().doc, 'walls', 'w0_despSuiteDiv');
-  eq(w.a.x, 5675); eq(w.b.x, 5675);
+  eq(w.a.x, 5575); eq(w.b.x, 5575);
   eq(st().undoLabel(), 'Mover parede');
+  ok(!st().inGesture(), 'gesture closed');
   ok(DD.ops.byId(docBefore, 'walls', 'w0_despSuiteDiv').a.x === 5475, 'previous doc not mutated');
   const desp = DD.rooms.compute(st().doc, 'f0').find((r) => r.name === 'Desp.');
-  near(desp.area, 1.76 + 0.2 * 1.6, 0.005);
+  near(desp.area, 1.76 + 0.1 * 1.6, 0.005);
   st().undo();
+  eq(DD.ops.byId(st().doc, 'walls', 'w0_despSuiteDiv').a.x, 5475, 'one undo step');
 });
 e2e('select: partition endpoint drag (snaps, openings keep world position)', () => {
   click({ x: 4225, y: 3500 }); // select w0_cozDesp
@@ -437,7 +529,7 @@ e2e('select: opening on a partition drags along its wall (clamped)', () => {
   move({ x: 4225, y: 3900 });
   move({ x: 4225, y: 2000 });
   up({ x: 4225, y: 2000 });
-  eq(DD.ops.byId(st().doc, 'openings', 'o0_p6_desp').t, 400, 'clamped to half width');
+  eq(DD.ops.byId(st().doc, 'openings', 'o0_p6_desp').t, 475, 'clamped clear of w0_back (75 mm) + half width');
   eq(st().undoLabel(), 'Mover P6');
   st().undo();
 });
@@ -569,6 +661,119 @@ e2e('floor change cancels in-progress tools; touch pinch zooms', () => {
   canvas.fire('pointerup', pev(700, 400, { pointerId: 12, pointerType: 'touch', buttons: 0 }));
   flush();
   eq(S.pinch, null);
+});
+
+e2e('wall tool splitting the Sala keeps both halves as rooms (Sala + Sala 2, same floor)', () => {
+  setTool('wall');
+  click({ x: 4310, y: 12510 });
+  move({ x: 8840, y: 12650 }, { buttons: 0 });
+  click({ x: 8840, y: 12650 });
+  P.cancel();
+  const rooms = DD.rooms.compute(st().doc, 'f0').filter((r) => !r.open);
+  const s2 = rooms.find((r) => r.name === 'Sala 2');
+  ok(s2 && s2.area > 9, 'new room ' + rooms.map((r) => r.name + ' ' + r.area.toFixed(2)).join(', '));
+  eq(s2.material, 'porcelanato');
+  near(DD.rooms.totalArea(st().doc, 'f0'), DD.rooms.totalArea(doc0, 'f0') - 4.55 * 0.1, 0.02);
+  st().undo();
+  eq(st().doc.roomSeeds.length, doc0.roomSeeds.length);
+});
+e2e('partition endpoint drag that closes a room reseeds it in the same undo step', () => {
+  setTool('wall');
+  click({ x: 4225, y: 12500 });
+  move({ x: 7000, y: 12500 }, { buttons: 0 });
+  click({ x: 7000, y: 12500 });
+  P.cancel();
+  const nw = st().doc.walls[st().doc.walls.length - 1];
+  const seeds0 = st().doc.roomSeeds.length;
+  setTool('select');
+  st().setUI({ selection: { kind: 'wall', id: nw.id } });
+  down({ x: 7000, y: 12500 });
+  move({ x: 8000, y: 12500 });
+  move({ x: 8925, y: 12500 });
+  up({ x: 8925, y: 12500 });
+  ok(!st().inGesture(), 'gesture closed');
+  eq(st().undoLabel(), 'Ajustar parede');
+  eq(st().doc.roomSeeds.length, seeds0 + 1, 'one new seed');
+  ok(DD.rooms.compute(st().doc, 'f0').some((r) => r.name === 'Sala 2' && !r.open), 'Sala 2 exists');
+  st().undo();
+  eq(st().doc.roomSeeds.length, seeds0, 'undo removes wall change and seed together');
+});
+e2e('undo during a drag cancels the gesture and drops the local drag', () => {
+  const before = st().doc;
+  down({ x: 6500, y: 12000 });
+  move({ x: 7000, y: 12300 });
+  ok(st().inGesture());
+  st().undo();
+  ok(!st().inGesture(), 'store gesture closed');
+  eq(st().doc, before);
+  eq(S.drag, null, 'local drag dropped');
+  move({ x: 7200, y: 12400 });
+  up({ x: 7200, y: 12400 });
+  eq(st().doc, before, 'later moves do nothing');
+});
+e2e('new measures are selected; measures over furniture stay selectable', () => {
+  setTool('measure');
+  click({ x: 5000, y: 12000 });
+  move({ x: 7600, y: 12000 }, { buttons: 0 });
+  click({ x: 7600, y: 12000 });
+  const m = st().doc.measures[0];
+  eq(JSON.stringify(st().ui.selection), JSON.stringify({ kind: 'measure', id: m.id }));
+  setTool('select');
+  st().setUI({ selection: null });
+  click({ x: 6500, y: 12000 }); // over the sofa
+  eq(st().ui.selection && st().ui.selection.kind, 'measure');
+  st().undo();
+});
+e2e('opening tags avoid the stair and each other; landing "8" and 1º pav "D" drawn', () => {
+  const ctx = canvas.getContext('2d');
+  ['f0', 'f1', 'f2'].forEach((floor) => {
+    [0.05, 0.1, 0.25].forEach((scale) => {
+      const ui = Object.assign(DD.defaultUI(), { floor });
+      const rc = T.makeRC(ctx, { cx: 5500, cy: 9000, scale, width: 1400, height: 1000 }, 1, st().doc, ui, { interactive: true });
+      T.drawScene(rc);
+      const tags = rc.placed.filter((b) => b.kind === 'tag');
+      const stairs = rc.placed.filter((b) => b.kind === 'stair' || b.kind === 'letter');
+      const hit = (a, b) => a.x0 < b.x1 - 0.5 && b.x0 < a.x1 - 0.5 && a.y0 < b.y1 - 0.5 && b.y0 < a.y1 - 0.5;
+      tags.forEach((t, i) => {
+        stairs.forEach((s) => ok(!hit(t, s), floor + '@' + scale + ' tag ' + t.id + ' on the stair'));
+        tags.slice(i + 1).forEach((u) => ok(!hit(t, u), floor + '@' + scale + ' tags ' + t.id + '/' + u.id + ' overlap'));
+      });
+      if (floor === 'f1') eq(rc.placed.filter((b) => b.kind === 'letter').map((b) => b.id).join(), 'up,down', 'S and D on the 1º pav');
+    });
+  });
+});
+e2e('room labels avoid furniture and wrap long names', () => {
+  const ctx = canvas.getContext('2d');
+  const doc = DD.ops.update(st().doc, 'roomSeeds', 'r0_desp', { name: 'Despensa e lavanderia de serviço' });
+  const bed = { id: 'bed', floor: 'f0', type: 'cama', x: 5825, y: 6700, rot: 0, w: 1600, d: 2000, h: 500, elev: 0, color: null };
+  const doc2 = Object.assign({}, doc, { furniture: doc.furniture.concat([bed]) });
+  const v = { cx: 5000, cy: 6000, scale: 0.12, width: 1400, height: 1000 };
+  const rc = T.makeRC(ctx, v, 1, doc2, Object.assign(DD.defaultUI(), { floor: 'f0' }), { interactive: true });
+  T.drawScene(rc);
+  const q = rc.placed.find((b) => b.kind === 'room' && b.id === 'room:r0_quarto');
+  const bs = { x0: (bed.x - 800 - v.cx) * v.scale + 700, x1: (bed.x + 800 - v.cx) * v.scale + 700, y0: (bed.y - 1000 - v.cy) * v.scale + 500, y1: (bed.y + 1000 - v.cy) * v.scale + 500 };
+  ok(q && !(q.x0 < bs.x1 && bs.x0 < q.x1 && q.y0 < bs.y1 && bs.y0 < q.y1), 'Quarto label off the bed ' + JSON.stringify(q));
+  const desp = rc.placed.find((b) => b.kind === 'room' && b.id === 'room:r0_desp');
+  ok(desp.x1 - desp.x0 <= 1100 * v.scale + 1, 'label no wider than the room: ' + (desp.x1 - desp.x0));
+  ok(desp.lines.length >= 3, 'name wrapped: ' + JSON.stringify(desp.lines));
+});
+e2e('exportPNG crops to the building and caps the image size', () => {
+  const made = [];
+  const orig = document.createElement;
+  document.createElement = () => {
+    const c = makeCanvas(10, 10);
+    made.push(c);
+    return c;
+  };
+  try {
+    P.exportPNG({ scale: 2 });
+    P.exportPNG({ scale: 6 });
+  } finally {
+    document.createElement = orig;
+  }
+  const [a, b] = made;
+  ok(a.width <= 4000 && a.height <= 4000 && b.width <= 4000 && b.height <= 4000, [a.width, a.height, b.width, b.height].join('×'));
+  ok(a.height < 4000 && a.width > 1500, 'about 2× the building: ' + a.width + '×' + a.height);
 });
 
 e2e('overlay states render without errors (tool previews, hovers, drag feedback, locks)', () => {

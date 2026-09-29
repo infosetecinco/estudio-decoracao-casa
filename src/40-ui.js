@@ -26,6 +26,20 @@
     roomName: 40,
   });
   const OPENING_CLEARANCE = 100; // mm kept free between openings and from wall ends
+  const OPENING_JAMB = 50; // mm of solid wall kept beside a jamb where the wall meets another wall
+  /** Largest sensible opening per style (mm): a single swing leaf is not a garage door. */
+  const STYLE_MAX = Object.freeze({
+    swing: 1200,
+    double: 2400,
+    slide: 2000,
+    slide4: 4000,
+    gate: 4000,
+    gateSlide: 5000,
+    slide2: 3000,
+    maxar: 3000,
+    fixedMaxar: 3000,
+    pivot: 3000,
+  });
   const NUDGE_MERGE_MS = 600;
   const NUDGE_STEP = 10;
   const NUDGE_STEP_BIG = 100;
@@ -47,7 +61,13 @@
   const PRINT_SCALE = 96 / 25.4 / 100; // css px per mm at 1:100 → "100 %"
   const DRAG_MIME = 'application/x-dd-furniture';
   const NARROW_MQ = '(max-width: 999px)';
+  const COARSE_MQ = '(pointer: coarse)';
   const EXPORT_JSON_NAME = 'projeto-casa-lote-38.json';
+  const EXPORT_3D_SCALE = 2; // 3D PNG = 2× the pane's css size
+  const THEME_KEY = 'dd.decor.theme'; // CONTRACT amendment: the UI may persist the theme choice itself
+  const BACKUP_SUFFIX = '.backup'; // DD.persist.key + suffix = local save kept before an import
+  const REFIT_TRACK_MS = 160; // keep re-fitting the plan while its pane settles after a docked bar appears
+  const MSG_PLAN_ONLY = 'Esse atalho é da planta 2D — pressione Q para voltar à planta.';
 
   const COLOR_SWATCHES = [
     { hex: '#F2EEE6', name: 'Off-white' },
@@ -73,15 +93,29 @@
     pivot: 'Pivotante',
   };
 
+  const DEFAULT_MURETA = 300; // mm — solid base of a railing when the wall carries no `mureta`
+  /** Wall kinds. `note(w)` reads the actual heights: ground muros are 2,00 m, terrace muros 1,80 m, railings vary. */
   const WALL_KIND = {
     structural: {
       label: 'Estrutural',
       locked: true,
-      note: 'Parede estrutural: sustenta as lajes e se repete no pavimento de cima. Não pode ser demolida, movida nem receber novas aberturas.',
+      note: () => 'Parede estrutural: sustenta as lajes e se repete no pavimento de cima. Não pode ser demolida, movida nem receber novas aberturas.',
     },
-    partition: { label: 'Não estrutural', locked: false, note: '' },
-    muro: { label: 'Muro de divisa', locked: true, note: 'Muro de divisa do lote (altura 1,80 m) — elemento fixo do projeto aprovado.' },
-    railing: { label: 'Guarda-corpo', locked: true, note: 'Guarda-corpo / mureta (≈ 1,00 m) — elemento de segurança fixo do projeto aprovado.' },
+    partition: { label: 'Não estrutural', locked: false, note: () => '' },
+    muro: {
+      label: 'Muro de divisa',
+      locked: true,
+      note: (w) => `Muro de divisa do lote (altura ${fmtM(w.height)} m) — elemento fixo do projeto aprovado.`,
+    },
+    railing: {
+      label: 'Guarda-corpo',
+      locked: true,
+      note: (w) => {
+        const mureta = w.mureta == null ? DEFAULT_MURETA : w.mureta;
+        const base = mureta > 0 ? `, mureta de ${fmtM(mureta)} m` : ', sem mureta';
+        return `Guarda-corpo (altura ${fmtM(w.height)} m${base}) — elemento de segurança fixo do projeto aprovado.`;
+      },
+    },
   };
 
   const PANEL_TITLES = { overview: 'Projeto', furniture: 'Móvel', wall: 'Parede', opening: 'Abertura', room: 'Ambiente', measure: 'Medida' };
@@ -89,7 +123,8 @@
 
   const CAM_MODES = [
     { id: 'orbit', label: 'Aérea', icon: 'orbit', hint: 'Arraste para girar · botão direito para deslocar · roda do mouse para zoom · clique para selecionar' },
-    { id: 'walk', label: 'Primeira pessoa', icon: 'walk', hint: 'Clique na vista para caminhar · W A S D para andar · mouse para olhar · Esc solta o cursor' },
+    // Shown only once the pointer is locked: before that, view3d's own centre prompt explains how to start.
+    { id: 'walk', label: 'Primeira pessoa', icon: 'walk', hint: 'W A S D ou setas para andar · mouse para olhar · Shift corre · Esc sai do modo caminhar' },
   ];
 
   const TOAST_ICONS = { info: 'info', ok: 'ok', warn: 'warn', error: 'error' };
@@ -112,7 +147,7 @@
     },
     {
       kind: 'muro',
-      label: 'Muro de divisa (1,80 m)',
+      label: 'Muro de divisa (térreo 2,00 m · terraço 1,80 m)',
       svg:
         '<defs><pattern id="lg-hatch-m" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
         '<line x1="0" y1="0" x2="0" y2="7" stroke="#6E655A" stroke-width="0.9"/></pattern></defs>' +
@@ -182,17 +217,21 @@
   };
 
   const SHORTCUT_GROUPS = [
-    { title: 'Ferramentas', items: TOOLS.map((t) => [[t.key], t.id === 'pan' ? 'Mover a vista' : t.label]) },
+    {
+      title: 'Ferramentas da planta',
+      items: TOOLS.map((t) => [[t.key], t.id === 'pan' ? 'Mover a vista' : t.label]).concat([[['Alt'], 'Segurar ao arrastar: desliga a adsorção às paredes']]),
+    },
     {
       title: 'Edição',
       items: [
         [['Ctrl', 'Z'], 'Desfazer'],
         [['Ctrl', 'Shift', 'Z'], 'Refazer (ou Ctrl + Y)'],
         [['Ctrl', 'D'], 'Duplicar móvel'],
-        [['Del'], 'Excluir / demolir a seleção'],
+        [['Del', '⌫'], 'Excluir / demolir a seleção'],
         [['R'], 'Girar 90° (Shift: sentido anti-horário)'],
         [['←', '↑', '→', '↓'], 'Deslocar 10 mm (Shift: 100 mm)'],
-        [['Esc'], 'Cancelar / limpar seleção'],
+        [['Enter'], 'Confirmar o valor de um campo'],
+        [['Esc'], 'Cancelar / limpar a seleção'],
         [['Ctrl', 'S'], 'Salvar neste navegador'],
       ],
     },
@@ -202,10 +241,23 @@
         [['1', '2', '3'], 'Térreo · 1º Pav. · 2º Pav.'],
         [['Q'], 'Alternar 2D / 3D'],
         [['Shift', 'Q'], 'Vista dividida'],
-        [['0'], 'Enquadrar o pavimento'],
-        [['+', '−'], 'Zoom'],
+        [['0'], 'Enquadrar o pavimento (3D: recentralizar)'],
+        [['+', '−'], 'Zoom da planta'],
         [['G'], 'Mostrar / ocultar a grade'],
         [['?'], 'Esta lista de atalhos'],
+      ],
+    },
+    {
+      title: 'Vista 3D',
+      items: [
+        [['Arrastar'], 'Aérea: girar a câmera'],
+        [['Botão direito'], 'Aérea: deslocar a câmera'],
+        [['Roda'], 'Aérea: zoom'],
+        [['Clique'], 'Primeira pessoa: começar a caminhar'],
+        [['W', 'A', 'S', 'D'], 'Andar (ou setas)'],
+        [['Mouse'], 'Olhar em volta'],
+        [['Shift'], 'Correr'],
+        [['Esc'], 'Sair do modo caminhar'],
       ],
     },
   ];
@@ -218,27 +270,41 @@
   const fmtInt = (v) => Math.round(v).toLocaleString('pt-BR');
   const fmtDeg = (deg) => String(Math.round(normDeg(deg) * 10) / 10).replace('.', ',');
 
+  const UNIT_SUFFIX = /(mm|cm|m|°|º)$/i;
+  const LENGTH_FACTOR = { mm: 1, cm: 10, m: 1000 };
+  /** Split "2,5 m" → { num: '2,5', unit: 'm' } (unit '' when none was typed). */
+  function splitUnit(raw) {
+    const s = String(raw == null ? '' : raw).trim().replace(/\s+/g, '');
+    const m = s.match(UNIT_SUFFIX);
+    return m ? { num: s.slice(0, -m[1].length), unit: m[1].toLowerCase().replace('º', '°') } : { num: s, unit: '' };
+  }
   /** Parse a user-typed decimal ("4,25", "4.25", "1.200,5", "90°"). Returns NaN when invalid. */
   function parseDecimal(raw) {
     if (raw == null) return NaN;
-    let s = String(raw).trim().replace(/\s+/g, '').replace(/(mm|m|°|º)$/i, '');
+    let s = splitUnit(raw).num;
     if (!s) return NaN;
     if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.');
     if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(s)) return NaN;
     return parseFloat(s);
   }
-  /** Millimetres: integers; "1.200" is read as one thousand two hundred (pt-BR thousands separator). */
-  function parseMM(raw) {
-    const s = String(raw == null ? '' : raw).trim().replace(/\s+/g, '');
-    const thousands = /^[-+]?\d{1,3}(\.\d{3})+(mm)?$/i.test(s);
-    const v = parseDecimal(thousands ? s.replace(/\./g, '') : s);
-    return isFinite(v) ? Math.round(v) : NaN;
+  /**
+   * A length typed by the user → integer millimetres. The unit may be typed ("2,5 m", "250 cm", "2500 mm");
+   * without one, `defaultUnit` applies. In millimetres "1.200" is one thousand two hundred (pt-BR thousands).
+   */
+  function parseLength(raw, defaultUnit) {
+    const { num, unit } = splitUnit(raw);
+    const u = unit || defaultUnit;
+    const factor = LENGTH_FACTOR[u];
+    if (!factor || !num) return NaN;
+    const thousands = u === 'mm' && /^[-+]?\d{1,3}(\.\d{3})+$/.test(num);
+    const v = parseDecimal(thousands ? num.replace(/\./g, '') : num);
+    return isFinite(v) ? Math.round(v * factor) : NaN;
   }
-  /** Metres typed by the user → millimetres. */
-  function parseMeters(raw) {
-    const v = parseDecimal(raw);
-    return isFinite(v) ? Math.round(v * 1000) : NaN;
-  }
+  /** Millimetre fields: "850", "1.200", "2,5 m", "250 cm". */
+  const parseMM = (raw) => parseLength(raw, 'mm');
+  /** Metre fields (positions): "4,25", "425 cm", "4250 mm" → millimetres. */
+  const parseMeters = (raw) => parseLength(raw, 'm');
+  const hasUnit = (raw) => !!splitUnit(raw).unit;
   /** Degrees → normalised 0–360 with one decimal. */
   function parseDegrees(raw) {
     const v = parseDecimal(raw);
@@ -261,13 +327,27 @@
    * Validate one inspector edit of a furniture item.
    * @returns {{patch:object}|{noop:true}|{error:string}}
    */
+  const UNIT_HELP = {
+    mm: 'use milímetros (ex.: 850) ou informe a unidade (2,5 m · 250 cm)',
+    m: 'use metros (ex.: 4,25) ou informe a unidade (425 cm · 4250 mm)',
+    '°': 'use graus (ex.: 90)',
+  };
+  /** Range error for a length field; when a bare number would fit as metres, say how to type it. */
+  function rangeError(label, v, raw, lim, unit) {
+    let msg = `${label} deve estar entre ${rangeText(lim, unit)}.`;
+    const asMetres = Math.round(parseDecimal(raw) * 1000);
+    if (unit === 'mm' && !hasUnit(raw) && v < lim.min && asMetres >= lim.min && asMetres <= lim.max) {
+      msg += ` Para ${fmtM(asMetres)} m, digite ${Math.round(asMetres)} ou “${String(raw).trim()} m”.`;
+    }
+    return msg;
+  }
   function furnitureEdit(item, field, raw, lot) {
     const spec = FURNITURE_FIELDS[field];
     if (!spec) return { error: 'Campo desconhecido.' };
     const v = spec.parse(raw);
-    if (!isFinite(v)) return { error: `${spec.label}: valor inválido.` };
+    if (!isFinite(v)) return { error: `${spec.label}: valor inválido — ${UNIT_HELP[spec.unit]}.` };
     const lim = spec.limit(lot || { w: 9000, h: 20000 });
-    if (lim && (v < lim.min || v > lim.max)) return { error: `${spec.label} deve estar entre ${rangeText(lim, spec.unit)}.` };
+    if (lim && (v < lim.min || v > lim.max)) return { error: rangeError(spec.label, v, raw, lim, spec.unit) };
     const current = field === 'rot' ? normDeg(item.rot || 0) : field === 'elev' ? item.elev || 0 : item[field];
     if (Math.abs(v - current) < 1e-6) return { noop: true };
     return { patch: { [field]: v } };
@@ -277,34 +357,98 @@
   function thicknessEdit(wall, raw) {
     const v = parseMM(raw);
     const lim = LIMITS.partitionThick;
-    if (!isFinite(v)) return { error: 'Espessura: valor inválido.' };
-    if (v < lim.min || v > lim.max) return { error: `Espessura deve estar entre ${rangeText(lim, 'mm')}.` };
+    if (!isFinite(v)) return { error: `Espessura: valor inválido — ${UNIT_HELP.mm}.` };
+    if (v < lim.min || v > lim.max) return { error: rangeError('Espessura', v, raw, lim, 'mm') };
     if (v === wall.thick) return { noop: true };
     return { patch: { thick: v } };
   }
 
-  /** Opening width edit: keeps the opening inside its wall and clear of its siblings. */
-  function openingWidthEdit(op, wallLength, raw, siblings) {
+  /**
+   * How far the body of wall `o` covers the ray from `p` along unit direction `d` (mm), 0 if `p` is not inside
+   * `o`. Used to find where a wall's clear span starts at a joint (a perpendicular wall covers thick/2).
+   */
+  function coverAlong(o, p, d) {
+    const len = Math.hypot(o.b.x - o.a.x, o.b.y - o.a.y);
+    if (len < 1) return 0;
+    const ux = (o.b.x - o.a.x) / len;
+    const uy = (o.b.y - o.a.y) / len;
+    const half = (o.thick || 0) / 2;
+    const rx = p.x - o.a.x;
+    const ry = p.y - o.a.y;
+    const u0 = rx * ux + ry * uy;
+    const v0 = rx * -uy + ry * ux;
+    if (u0 < -1 || u0 > len + 1 || Math.abs(v0) > half + 1) return 0;
+    const du = d.x * ux + d.y * uy;
+    const dv = d.x * -uy + d.y * ux;
+    const exits = [];
+    if (du > 1e-9) exits.push((len - u0) / du);
+    else if (du < -1e-9) exits.push(-u0 / du);
+    if (dv > 1e-9) exits.push((half - v0) / dv);
+    else if (dv < -1e-9) exits.push((-half - v0) / dv);
+    return exits.length ? Math.max(0, Math.min.apply(null, exits)) : 0;
+  }
+  /**
+   * Clear span of a wall where openings may go: `{lo, hi}` in mm from wall.a, keeping OPENING_CLEARANCE from the
+   * centre-line ends and OPENING_JAMB of solid wall beyond any wall that meets this one at either end.
+   */
+  function wallFreeSpan(d, wall) {
+    const L = Math.hypot(wall.b.x - wall.a.x, wall.b.y - wall.a.y);
+    if (L < 1) return { lo: 0, hi: 0 };
+    const dir = { x: (wall.b.x - wall.a.x) / L, y: (wall.b.y - wall.a.y) / L };
+    const back = { x: -dir.x, y: -dir.y };
+    let insetA = 0;
+    let insetB = 0;
+    ((d && d.walls) || []).forEach((o) => {
+      if (o.id === wall.id || o.floor !== wall.floor) return;
+      insetA = Math.max(insetA, coverAlong(o, wall.a, dir));
+      insetB = Math.max(insetB, coverAlong(o, wall.b, back));
+    });
+    const lo = Math.max(OPENING_CLEARANCE, insetA > 0 ? insetA + OPENING_JAMB : 0);
+    const hi = L - Math.max(OPENING_CLEARANCE, insetB > 0 ? insetB + OPENING_JAMB : 0);
+    return { lo: Math.round(lo), hi: Math.round(hi) };
+  }
+
+  /**
+   * Opening width edit: the opening stays inside the clear span of its wall (`span` from wallFreeSpan), keeps
+   * OPENING_CLEARANCE from its neighbours and respects a sensible maximum for its style. The centre moves only
+   * as much as needed to fit.
+   */
+  function openingWidthEdit(op, wallLength, raw, siblings, span) {
     const v = parseMM(raw);
-    if (!isFinite(v)) return { error: 'Largura: valor inválido.' };
-    const max = Math.min(LIMITS.openingWidth.max, Math.floor(wallLength));
-    const lim = { min: LIMITS.openingWidth.min, max };
-    if (max < lim.min || v < lim.min || v > max) return { error: `Largura deve estar entre ${rangeText(lim, 'mm')}.` };
+    if (!isFinite(v)) return { error: `Largura: valor inválido — ${UNIT_HELP.mm}.` };
+    const s = span || { lo: OPENING_CLEARANCE, hi: wallLength - OPENING_CLEARANCE };
+    const others = (siblings || []).filter((o) => o.id !== op.id);
+    const left = others.filter((o) => o.t <= op.t).reduce((m, o) => Math.max(m, o.t + o.width / 2 + OPENING_CLEARANCE), s.lo);
+    const right = others.filter((o) => o.t > op.t).reduce((m, o) => Math.min(m, o.t - o.width / 2 - OPENING_CLEARANCE), s.hi);
+    const styleMax = STYLE_MAX[op.style] || LIMITS.openingWidth.max;
+    const fitMax = Math.floor(right - left);
+    const max = Math.min(LIMITS.openingWidth.max, styleMax, fitMax);
+    const min = LIMITS.openingWidth.min;
     if (v === op.width) return { noop: true };
-    const t = Math.round(clamp(op.t, v / 2, wallLength - v / 2));
-    const overlaps = (siblings || []).some((o) => o.id !== op.id && Math.abs(o.t - t) < (o.width + v) / 2);
-    if (overlaps) return { error: 'Com essa largura a abertura ficaria sobreposta a outra.' };
+    if (v < min) return { error: rangeError('Largura', v, raw, { min, max: Math.max(min, max) }, 'mm') };
+    if (v > styleMax) {
+      const kind = (STYLE_LABELS[op.style] || 'este tipo').toLowerCase();
+      return { error: `Largura máxima para ${op.type === 'window' ? 'janela' : 'porta'} ${kind}: ${fmtInt(styleMax)} mm.` };
+    }
+    if (v > fitMax) {
+      return fitMax < min
+        ? { error: 'Não há espaço livre nesta parede para alargar a abertura.' }
+        : { error: `Não cabe: entre as paredes e as aberturas vizinhas, a largura máxima aqui é ${fmtInt(fitMax)} mm.` };
+    }
+    if (v > LIMITS.openingWidth.max) return { error: rangeError('Largura', v, raw, { min, max }, 'mm') };
+    const t = Math.round(clamp(op.t, left + v / 2, right - v / 2));
     return { patch: { width: v, t } };
   }
 
   /**
    * Position (distance from wall.a, mm) for a new opening of `width` on a wall of length L, as close to the
-   * middle as possible and at least `clearance` away from other openings and from the wall ends; null if none.
+   * middle as possible and at least `clearance` away from other openings and from the wall ends (or inside
+   * `span` from wallFreeSpan when given); null if none.
    */
-  function findFreeT(L, existing, width, clearance) {
+  function findFreeT(L, existing, width, clearance, span) {
     const gap = clearance == null ? OPENING_CLEARANCE : clearance;
-    const lo = gap;
-    const hi = L - gap;
+    const lo = span ? Math.max(span.lo, 0) : gap;
+    const hi = span ? Math.min(span.hi, L) : L - gap;
     if (hi - lo < width) return null;
     const busy = (existing || [])
       .map((o) => [o.t - o.width / 2 - gap, o.t + o.width / 2 + gap])
@@ -342,6 +486,15 @@
     const d = date instanceof Date ? date : new Date(date);
     return isNaN(d.getTime()) ? '' : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
+  /** "14:32" today, "28/09 14:32" on another day ("28/09/2026 14:32" with `withYear`). */
+  function fmtSavedAt(at, now, withYear) {
+    const d = at instanceof Date ? at : new Date(at);
+    if (isNaN(d.getTime())) return '';
+    const n = now instanceof Date ? now : new Date();
+    const pad = (v) => String(v).padStart(2, '0');
+    if (!withYear && d.toDateString() === n.toDateString()) return fmtTime(d);
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}${withYear ? '/' + d.getFullYear() : ''} ${fmtTime(d)}`;
+  }
   function normHex(c) {
     const s = String(c == null ? '' : c).trim();
     if (/^#[0-9a-f]{6}$/i.test(s)) return s.toUpperCase();
@@ -420,6 +573,8 @@
     staleTimer: 0,
     layoutRaf: 0,
     trackUntil: 0,
+    trackRaf: 0,
+    refitUntil: 0,
     cursorRaf: 0,
     cursorPoint: null,
     saveTimer: 0,
@@ -428,6 +583,9 @@
     libQuery: '',
     paintBuilt: false,
     lastToast: { msg: '', at: 0 },
+    keyboardNav: false,
+    lastPointerType: 'mouse',
+    to3DCamera: null,
     tooltip: null,
     dialogReturn: null,
     el: {},
@@ -604,6 +762,11 @@
     setUI({ selection: kind ? { kind, id } : null });
     if (kind && focus) DD.events.emit('focus:item', { kind, id });
   }
+  /**
+   * Arrow-key nudges are merged into one undo step through a short store gesture. It is always closed before
+   * anything else can touch the document: other commands call flushNudge(), and so does a capture-phase
+   * pointerdown (initKeyboard), so a mouse drag in 2D/3D never starts inside — or gets closed by — a nudge.
+   */
   function flushNudge() {
     const n = S.nudge;
     if (!n) return;
@@ -611,12 +774,13 @@
     S.nudge = null;
     if (DD.store.inGesture && DD.store.inGesture()) DD.store.endGesture(n.label);
   }
+  /** A pointer drag (plan2d / view3d) owns an open store gesture: keyboard edits must wait for it to end. */
+  const pointerGestureActive = () => !!(DD.store && DD.store.inGesture && DD.store.inGesture() && !S.nudge);
   function nudgeSelection(dx, dy) {
     const sel = ui().selection;
     if (!sel || sel.kind !== 'furniture') return;
     const st = DD.store;
-    const inForeignGesture = st.inGesture && st.inGesture() && !S.nudge;
-    if (inForeignGesture) return;
+    if (pointerGestureActive()) return;
     const item = DD.ops.byId(doc(), 'furniture', sel.id);
     if (!item) return;
     if (!S.nudge || S.nudge.id !== item.id) {
@@ -710,7 +874,7 @@
       toast('Só é possível abrir vãos em paredes não estruturais.', 'warn');
       return;
     }
-    const t = findFreeT(wallLength(w), openingsOfWall(d, wallId), spec.width);
+    const t = findFreeT(wallLength(w), openingsOfWall(d, wallId), spec.width, OPENING_CLEARANCE, wallFreeSpan(d, w));
     if (t == null) {
       toast(`Não há espaço livre nesta parede para ${code} (${fmtM(spec.width)} m).`, 'warn');
       return;
@@ -735,7 +899,7 @@
   function editOpeningWidth(id, raw) {
     const { d, op, wall } = openingContext(id);
     if (!op || !wall || !DD.ops.isEditableWall(wall)) return false;
-    const res = openingWidthEdit(op, wallLength(wall), raw, openingsOfWall(d, wall.id));
+    const res = openingWidthEdit(op, wallLength(wall), raw, openingsOfWall(d, wall.id), wallFreeSpan(d, wall));
     if (res.error) {
       toast(res.error, 'warn');
       return false;
@@ -810,7 +974,7 @@
     flushNudge();
     if (DD.persist.save(doc())) {
       DD.events.emit('saved', { auto: false, at: new Date() });
-      toast('Projeto salvo neste navegador', 'ok');
+      toast('Projeto salvo neste navegador.', 'ok');
     } else {
       toast('Não foi possível salvar: o armazenamento do navegador está indisponível ou cheio.', 'error');
     }
@@ -842,8 +1006,13 @@
   }
 
   // =================================================================== toasts
+  /** One punctuation style for every toast (other modules' included): sentences end with a full stop. */
+  function punctuate(msg) {
+    const text = String(msg == null ? '' : msg).trim();
+    return !text || /[.!?…]$/.test(text) ? text : text + '.';
+  }
   function showToast(msg, kind) {
-    const text = String(msg == null ? '' : msg);
+    const text = punctuate(msg);
     const k = TOAST_ICONS[kind] ? kind : 'info';
     const box = document.getElementById('toasts');
     if (!box) {
@@ -890,11 +1059,27 @@
       S.tooltip.target = t;
       S.tooltip.timer = setTimeout(() => showTooltip(t), TOOLTIP_DELAY);
     });
+    // Focus tooltips only for keyboard navigation: never for programmatic focus after a click or a tap.
     document.addEventListener('focusin', (e) => {
       const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
       hideTooltip();
-      if (t && t.matches(':focus-visible')) showTooltip(t);
+      if (t && S.keyboardNav && t.matches(':focus-visible')) showTooltip(t);
     });
+    document.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.key === 'Tab' || e.key.indexOf('Arrow') === 0 || e.key === 'Home' || e.key === 'End') S.keyboardNav = true;
+      },
+      true
+    );
+    document.addEventListener(
+      'pointerdown',
+      (e) => {
+        S.keyboardNav = false;
+        S.lastPointerType = e.pointerType || 'mouse';
+      },
+      true
+    );
     ['pointerdown', 'focusout', 'keydown', 'wheel'].forEach((ev) => document.addEventListener(ev, hideTooltip, true));
   }
   function hideTooltip() {
@@ -1002,6 +1187,7 @@
       'export-3d': export3D,
       'export-json': exportJSON,
       import: () => document.getElementById('file-import').click(),
+      'restore-backup': restoreBackup,
       reset: resetProject,
       theme: toggleTheme,
       shortcuts: openShortcuts,
@@ -1117,12 +1303,57 @@
     DD.persist.downloadDataURL(url, `planta-${activeFloorSlug()}.png`);
     toast('Planta exportada em PNG.', 'ok');
   }
-  function export3D() {
-    if (!call('view3d', 'isReady')) return toast('A vista 3D ainda não está pronta para exportar.', 'warn');
-    const url = call('view3d', 'exportPNG');
+  /** 3D file name: the floor only when the view is cut at the active floor. */
+  function export3DName() {
+    return ui().showAllFloors ? 'vista-3d-casa.png' : `vista-3d-${activeFloorSlug()}.png`;
+  }
+  /**
+   * Render the 3D view at EXPORT_3D_SCALE × its css size. view3d sizes its renderer from the container, so the
+   * container is enlarged for one synchronous render and scaled back visually (no paint happens in between).
+   */
+  function render3DHiRes() {
+    const host = S.el.view3d;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const k = host ? EXPORT_3D_SCALE / dpr : 1;
+    const w = host ? host.clientWidth : 0;
+    const h = host ? host.clientHeight : 0;
+    const enlarge = k > 1.01 && w > 1 && h > 1;
+    if (enlarge) {
+      Object.assign(host.style, { width: w * k + 'px', height: h * k + 'px', right: 'auto', bottom: 'auto', transform: `scale(${1 / k})`, transformOrigin: '0 0', transition: 'none' });
+      call('view3d', 'resize');
+    }
+    try {
+      return call('view3d', 'exportPNG', { scale: EXPORT_3D_SCALE });
+    } finally {
+      if (enlarge) {
+        ['width', 'height', 'right', 'bottom', 'transform', 'transformOrigin', 'transition'].forEach((p) => (host.style[p] = ''));
+        call('view3d', 'resize');
+      }
+    }
+  }
+  /** Exports what the 3D camera shows. From the 2D view it opens the 3D view first, so the file matches the screen. */
+  async function export3D() {
+    if (is3DUnavailable()) return notify3DNotReady();
+    if (!call('view3d', 'isReady')) return toast('A vista 3D ainda está carregando — tente exportar de novo em instantes.', 'info');
+    if (ui().view === '2d') {
+      toast('Abrindo a vista 3D para exportar a câmera atual…', 'info');
+      await setView('3d');
+      if (S.to3DCamera) await withTimeout(S.to3DCamera, TO3D_MS + 600);
+      if (ui().view === '2d') return; // the user switched back meanwhile
+    }
+    const url = render3DHiRes();
     if (!isDataURL(url)) return toast('Não foi possível gerar a imagem 3D.', 'error');
-    DD.persist.downloadDataURL(url, `vista-3d-${activeFloorSlug()}.png`);
-    toast('Vista 3D exportada em PNG.', 'ok');
+    DD.persist.downloadDataURL(url, export3DName());
+    const size = await imageSize(url);
+    toast(size ? `Vista 3D exportada em PNG (${size.w} × ${size.h} px).` : 'Vista 3D exportada em PNG.', 'ok');
+  }
+  function imageSize(url) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
   }
   function exportJSON() {
     try {
@@ -1134,14 +1365,52 @@
       toast('Não foi possível exportar o projeto.', 'error');
     }
   }
+
+  // ----- local backup kept before a whole-project replacement (import / reset / recover)
+  const backupKey = () => DD.persist.key + BACKUP_SUFFIX;
+  function writeBackup(d) {
+    try {
+      localStorage.setItem(backupKey(), JSON.stringify({ savedAt: new Date().toISOString(), doc: d }));
+      return true;
+    } catch (err) {
+      console.warn('[ui] backup failed', err);
+      return false;
+    }
+  }
+  function readBackupMeta() {
+    try {
+      const raw = localStorage.getItem(backupKey());
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      console.warn('[ui] backup unreadable', err);
+      return null;
+    }
+  }
+  function readBackup() {
+    const parsed = readBackupMeta();
+    const d = parsed ? DD.persist.validate(parsed.doc) : null;
+    return d ? { doc: d, savedAt: parsed.savedAt } : null;
+  }
+  function syncBackupItem() {
+    const item = $('[data-action="restore-backup"]');
+    if (!item) return;
+    const meta = readBackupMeta();
+    const at = meta && meta.savedAt;
+    item.hidden = !at;
+    setText($('.menu-meta', item), at ? fmtSavedAt(at, new Date()) : '');
+  }
+  /** Replace the whole project; the current one is kept as the local backup (recoverable from the ⋯ menu). */
   function loadDocument(next, label) {
     flushNudge();
     call('plan2d', 'cancel');
+    const kept = writeBackup(doc());
     DD.store.replace(next, label);
     const u = ui();
     const floor = floorOf(next, u.floor) ? u.floor : (next.floors[0] || {}).id;
     setUI({ floor, selection: null });
     call('plan2d', 'fit');
+    syncBackupItem();
+    return kept;
   }
   function onImportFile(e) {
     const input = e.target;
@@ -1152,11 +1421,30 @@
     DD.persist
       .readJSONFile(file)
       .then((next) => {
+        const dropped = DD.persist.lastDropped || 0;
         if (!next.floors.length) throw new Error('O arquivo não contém pavimentos.');
-        loadDocument(next, 'Importar projeto');
-        toast('Projeto importado: ' + file.name, 'ok');
+        const kept = loadDocument(next, 'Importar projeto');
+        const undoHint = kept ? 'O projeto anterior ficou guardado em “Mais opções › Recuperar projeto anterior”.' : 'Ctrl + Z desfaz a importação.';
+        toast(`Projeto importado: ${file.name}. ${undoHint}`, 'ok');
+        if (dropped > 0) toast(`${dropped} ${dropped === 1 ? 'item inválido foi ignorado' : 'itens inválidos foram ignorados'} na importação.`, 'warn');
       })
       .catch((err) => toast(err && err.message ? err.message : 'Não foi possível importar o arquivo.', 'error'));
+  }
+  function restoreBackup() {
+    const b = readBackup();
+    if (!b) {
+      syncBackupItem();
+      return toast('Não há projeto anterior guardado neste navegador.', 'warn');
+    }
+    confirmDialog({
+      title: 'Recuperar projeto anterior?',
+      body: `Volta o projeto guardado em ${fmtSavedAt(b.savedAt, new Date(), true)}, antes da última importação ou restauração. O projeto atual fica guardado no lugar dele.`,
+      confirm: 'Recuperar',
+    }).then((ok) => {
+      if (!ok) return;
+      loadDocument(b.doc, 'Recuperar projeto anterior');
+      toast('Projeto anterior recuperado.', 'ok');
+    });
   }
   function defaultFurniture(fresh) {
     if (!hasFn('catalog', 'defaultLayout')) return [];
@@ -1181,15 +1469,35 @@
       toast('Projeto original restaurado.', 'ok');
     });
   }
+
+  // ----- theme (persisted in localStorage THEME_KEY; the <head> of shell.html applies it before first paint)
+  function storedTheme() {
+    try {
+      const t = localStorage.getItem(THEME_KEY);
+      return t === 'light' || t === 'dark' ? t : null;
+    } catch (err) {
+      return null;
+    }
+  }
   function effectiveTheme() {
     const t = document.documentElement.getAttribute('data-theme');
     if (t === 'light' || t === 'dark') return t;
     return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   }
   function toggleTheme() {
-    document.documentElement.setAttribute('data-theme', effectiveTheme() === 'dark' ? 'light' : 'dark');
+    const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (err) {
+      console.warn('[ui] theme not persisted', err);
+    }
     syncThemeLabel();
     call('plan2d', 'redraw');
+  }
+  function applyStoredTheme() {
+    const t = storedTheme();
+    if (t && document.documentElement.getAttribute('data-theme') !== t) document.documentElement.setAttribute('data-theme', t);
   }
   const syncThemeLabel = () => setText(document.getElementById('theme-label'), effectiveTheme() === 'dark' ? 'Tema claro' : 'Tema escuro');
 
@@ -1293,7 +1601,7 @@
             'data-tip': t.id === 'pan' ? 'Mover a vista' : t.label,
             'data-key': t.key,
             'data-tip-pos': 'right',
-            onclick: () => setTool(t.id),
+            onclick: () => pickToolFromRail(t.id),
           },
           [icon(t.icon)]
         )
@@ -1307,8 +1615,17 @@
       h('button', { type: 'button', class: 'icon-btn hide-compact', 'aria-label': 'Atalhos de teclado', 'data-tip': 'Atalhos', 'data-key': '?', 'data-tip-pos': 'right', onclick: openShortcuts }, [icon('keyboard')])
     );
   }
-  function syncToolRail(u) {
-    $$('#toolrail .tool-btn').forEach((b) => setPressed(b, b.getAttribute('data-tool') === u.tool));
+  /** In the 3D-only view no 2D tool is active; a click on the rail is explicit, so it brings the plan back. */
+  function syncToolRail(u, view) {
+    const is3d = (view || S.appliedView || u.view) === '3d';
+    $$('#toolrail .tool-btn').forEach((b) => {
+      setPressed(b, !is3d && b.getAttribute('data-tool') === u.tool);
+      b.setAttribute('data-tip', (b.getAttribute('data-tip') || '').replace(/ — volta à planta 2D$/, '') + (is3d ? ' — volta à planta 2D' : ''));
+    });
+  }
+  function pickToolFromRail(id) {
+    setTool(id);
+    if (planHidden()) setView('2d');
   }
 
   // =================================================================== library
@@ -1327,12 +1644,22 @@
       .sort((a, b) => rank(a.def) - rank(b.def))
       .map(({ type, def }) => createLibCard(type, def));
     S.libCards.forEach((c) => grid.appendChild(c.el));
+    syncLibraryFoot();
+    if (window.matchMedia) {
+      const mq = window.matchMedia(COARSE_MQ);
+      if (mq.addEventListener) mq.addEventListener('change', syncLibraryFoot);
+    }
     S.el.libEmpty = h('p', { class: 'lib-empty', text: 'Nenhum móvel encontrado.', hidden: true });
     grid.appendChild(S.el.libEmpty);
     renderChips(cat);
     bindLibraryEvents(grid);
     filterLibrary();
     loadThumbnails(S.libCards.slice());
+  }
+  /** HTML drag & drop does not exist on touch screens: say what a tap does there. */
+  function syncLibraryFoot() {
+    const coarse = !!(window.matchMedia && window.matchMedia(COARSE_MQ).matches);
+    setText($('.lib-foot'), coarse ? 'Toque num móvel para adicioná-lo à planta' : 'Arraste para a planta ou clique para adicionar');
   }
   function createLibCard(type, def) {
     const img = h('img', { alt: '', width: 72, height: 54, decoding: 'async', draggable: 'false' });
@@ -1452,7 +1779,7 @@
   function afterAdd(type) {
     const def = typeDef(type);
     if (isNarrow() && S.drawer === 'library') closeDrawer(false);
-    if (def) toast(`${def.name} adicionado`, 'ok');
+    if (def) toast(`Adicionado: ${def.name}.`, 'ok'); // gender-neutral ("Poltrona adicionado" was wrong)
   }
   function addFurnitureAtPoint(type, clientX, clientY) {
     if (!typeDef(type)) return toast('Tipo de móvel desconhecido.', 'warn');
@@ -1493,6 +1820,7 @@
 
   // =================================================================== stage & view switching
   function initStage() {
+    S.el.app = document.getElementById('app');
     S.el.stage = document.getElementById('stage');
     S.el.view2d = document.getElementById('view2d');
     S.el.view3d = document.getElementById('view3d');
@@ -1500,7 +1828,12 @@
     initDivider();
     bindDropTarget(S.el.view2d, (type, e) => addFurnitureAtPoint(type, e.clientX, e.clientY));
     bindDropTarget(S.el.view3d, (type) => addAtFloorCentre(type));
-    window.addEventListener('resize', scheduleLayout);
+    window.addEventListener('resize', onWindowResize);
+  }
+  /** The resize event runs before plan2d's ResizeObserver, so the viewport still has the old size here. */
+  function onWindowResize() {
+    if (S.ready && planShowsWholeFloor()) refitPlanFor(REFIT_TRACK_MS);
+    scheduleLayout();
   }
   /** Redraw both views on the next frame (after any layout change). */
   function scheduleLayout() {
@@ -1511,16 +1844,52 @@
       if (ui().view !== '2d') call('view3d', 'resize');
     });
   }
-  /** Keep the canvases in step with a CSS width/left animation for `ms`. */
+  /** Keep the canvases in step with a CSS width/left animation for `ms` (and keep the plan fitted if asked). */
   function trackLayout(ms) {
     S.trackUntil = Math.max(S.trackUntil, performance.now() + ms);
+    if (S.trackRaf) return;
     const tick = () => {
+      S.trackRaf = 0;
       call('view3d', 'resize');
-      call('plan2d', 'redraw');
-      if (performance.now() < S.trackUntil) requestAnimationFrame(tick);
+      if (performance.now() < S.refitUntil) call('plan2d', 'fit');
+      else call('plan2d', 'redraw');
+      if (performance.now() < S.trackUntil) S.trackRaf = requestAnimationFrame(tick);
     };
-    requestAnimationFrame(tick);
+    S.trackRaf = requestAnimationFrame(tick);
   }
+
+  // ----- keep the whole floor in view when the 2D pane changes size (split view, docked paint bar)
+  function floorBBox() {
+    const d = doc();
+    try {
+      const dd = DD.geom.dimensionData(d, ui().floor);
+      if (dd && dd.bbox && isFinite(dd.bbox.minX)) return dd.bbox;
+    } catch (err) {
+      console.warn('[ui] dimensionData', err);
+    }
+    const lot = lotSize(d);
+    return { minX: 0, minY: 0, maxX: lot.w, maxY: lot.h };
+  }
+  /** Pure: does viewport `vp` (plan2d.getViewport) show the whole box? `tol` css px of slack. */
+  function viewportShowsBox(vp, box, tol) {
+    if (!vp || !box || !(vp.scale > 0) || !(vp.width > 0) || !(vp.height > 0)) return false;
+    const t = tol == null ? 2 : tol;
+    const sx = (x) => (x - vp.cx) * vp.scale + vp.width / 2;
+    const sy = (y) => (y - vp.cy) * vp.scale + vp.height / 2;
+    return sx(box.minX) >= -t && sx(box.maxX) <= vp.width + t && sy(box.minY) >= -t && sy(box.maxY) <= vp.height + t;
+  }
+  /**
+   * The user sees the whole floor (the state fit() leaves): after the 2D pane is resized, fit again so it stays
+   * whole. A plan the user zoomed into keeps its zoom and centre.
+   */
+  const planShowsWholeFloor = () => viewportShowsBox(call('plan2d', 'getViewport'), floorBBox());
+  /** Re-fit the plan every frame for `ms` (while a pane animates or a docked bar settles). */
+  function refitPlanFor(ms) {
+    S.refitUntil = Math.max(S.refitUntil, performance.now() + ms);
+    trackLayout(ms);
+  }
+  const paneSize2D = (view) => (view === 'split' ? 'split' : 'full'); // the 2D canvas keeps its size under 3D
+
   function applyViewInstant(view) {
     const stage = S.el.stage;
     stage.classList.add('no-anim');
@@ -1534,16 +1903,27 @@
     syncDivider(view);
     scheduleLayout();
   }
-  function finishView(view, token) {
+  function finishView(view, token, refit) {
     if (token !== S.viewToken) return false;
     if (view === '2d') call('view3d', 'setActive', false);
+    if (refit) refitPlanFor(REFIT_TRACK_MS);
     scheduleLayout();
     DD.events.emit('view:changed', { view });
     return true;
   }
+  /** view3d gave up (three.js did not load, no WebGL): prefer its own flag, fall back to its error status. */
+  function is3DUnavailable() {
+    if (!DD.view3d) return true;
+    if (hasFn('view3d', 'isFailed')) return !!call('view3d', 'isFailed');
+    const st = $('#view3d .v3d-status.is-error');
+    return !!(st && !st.hidden);
+  }
   function notify3DNotReady() {
-    if (!DD.view3d) toast('A vista 3D não está disponível neste navegador.', 'warn');
-    else toast('A vista 3D ainda está carregando…', 'info');
+    if (is3DUnavailable()) {
+      const st = $('#view3d .v3d-status.is-error');
+      const why = st && st.textContent.trim();
+      toast(why ? 'A vista 3D não está disponível: ' + why.charAt(0).toLowerCase() + why.slice(1) : 'A vista 3D não está disponível neste navegador — a planta 2D continua funcionando.', 'warn');
+    } else toast('A vista 3D ainda está carregando…', 'info');
   }
   function animateTo3D(token) {
     const vp = call('plan2d', 'getViewport');
@@ -1551,8 +1931,10 @@
     call('view3d', 'setActive', true);
     const ready = !!call('view3d', 'isReady');
     S.el.stage.setAttribute('data-view', '3d');
-    if (ready && vp) promiseOf(call('view3d', 'transitionFrom2D', vp, TO3D_MS)).catch((err) => console.error('[ui] transitionFrom2D', err));
-    else notify3DNotReady();
+    S.to3DCamera = null;
+    if (ready && vp) {
+      S.to3DCamera = promiseOf(call('view3d', 'transitionFrom2D', vp, TO3D_MS)).catch((err) => console.error('[ui] transitionFrom2D', err));
+    } else notify3DNotReady();
     return wait(VIEW_FADE_MS + 40).then(() => finishView('3d', token));
   }
   function animateTo2D(token) {
@@ -1568,14 +1950,15 @@
         return wait(VIEW_FADE_MS + 180).then(() => finishView('2d', token));
       });
   }
-  function animateLayout(view, token) {
+  function animateLayout(view, token, refit) {
     if (view !== '2d') {
       call('view3d', 'setActive', true);
       if (!call('view3d', 'isReady')) notify3DNotReady();
     }
     S.el.stage.setAttribute('data-view', view);
-    trackLayout(LAYOUT_ANIM_MS + 80);
-    return wait(Math.max(LAYOUT_ANIM_MS, VIEW_FADE_MS) + 80).then(() => finishView(view, token));
+    if (refit) refitPlanFor(LAYOUT_ANIM_MS + 80);
+    else trackLayout(LAYOUT_ANIM_MS + 80);
+    return wait(Math.max(LAYOUT_ANIM_MS, VIEW_FADE_MS) + 80).then(() => finishView(view, token, refit));
   }
   /**
    * Switch between '2d' | 'split' | '3d' with animated transitions (instant with prefers-reduced-motion).
@@ -1590,16 +1973,26 @@
     flushNudge();
     syncViewToggle(view);
     syncDivider(view);
+    syncViewContext(view);
     ensureOverlayAttached();
+    // Entering / leaving the split changes the 2D pane width: keep a fully visible floor fully visible.
+    const refit = from != null && paneSize2D(from) !== paneSize2D(view) && planShowsWholeFloor();
     const token = ++S.viewToken;
     if (from == null || reducedMotion() || !S.ready) {
       applyViewInstant(view);
-      return Promise.resolve(finishView(view, token));
+      return Promise.resolve(finishView(view, token, refit));
     }
     if (from === '2d' && view === '3d') return animateTo3D(token);
     if (from === '3d' && view === '2d') return animateTo2D(token);
-    return animateLayout(view, token);
+    return animateLayout(view, token, refit);
   }
+  /** 2D-only chrome (tool rail, zoom, grid/dims/labels toggles, cursor) is inert while only the 3D view shows. */
+  function syncViewContext(view) {
+    if (S.el.app) S.el.app.setAttribute('data-view', view);
+    if (S.ready || S.initialized) syncStatus(ui(), view);
+    syncToolRail(ui(), view);
+  }
+  const planHidden = () => (S.appliedView || ui().view) === '3d';
 
   // split divider
   function initDivider() {
@@ -1675,10 +2068,19 @@
     strip.appendChild(row);
     S.paintBuilt = true;
   }
+  /**
+   * The paint palette is docked above the plan (it takes layout space instead of floating over the dimension
+   * chains); when it appears or goes away a fully visible floor is re-fitted to the new canvas height.
+   */
   function syncPaintStrip(u) {
     const strip = document.getElementById('paint-strip');
     const on = u.tool === 'paint';
-    strip.hidden = !on;
+    if (strip.hidden === on) {
+      const refit = S.ready && !planHidden() && planShowsWholeFloor();
+      strip.hidden = !on;
+      if (S.el.view2d) S.el.view2d.classList.toggle('has-dock', on);
+      if (refit) refitPlanFor(REFIT_TRACK_MS);
+    }
     if (!on) return;
     if (!S.paintBuilt) renderPaintStrip();
     $$('.paint-swatch', strip).forEach((b) => setPressed(b, b.getAttribute('data-mat') === u.paintMaterial));
@@ -1787,7 +2189,7 @@
       spellcheck: 'false',
       maxlength: opts.maxLength || null,
       'aria-label': opts.aria || opts.label,
-      title: opts.aria || null,
+      title: opts.aria ? opts.aria + (FIELD_UNIT_HELP[opts.unit] || '') : null,
     });
     const el = h('label', { class: 'field' }, [
       h('span', { class: 'field-label', text: opts.label, 'aria-hidden': 'true' }),
@@ -1834,6 +2236,7 @@
       },
     };
   }
+  const FIELD_UNIT_HELP = { mm: ' — aceita também “2,5 m” ou “250 cm”', m: ' — aceita também “425 cm” ou “4250 mm”' };
   function heroBlock(media, title, sub) {
     return h('div', { class: 'insp-hero' }, [media, h('div', { class: 'insp-hero-text' }, [title, sub])]);
   }
@@ -2048,7 +2451,7 @@
           b.disabled = !editable;
         });
         note.hidden = editable;
-        setText(note, info.note);
+        setText(note, info.note(w));
         const ops = openingsOfWall(d, w.id);
         const sig = ops.map((o) => [o.id, o.code, o.width, o.style].join(':')).join('|');
         if (sig !== openingsSig) renderOpeningList(openList, ops);
@@ -2285,6 +2688,12 @@
   }
 
   // =================================================================== status bar
+  /** A project restored from the local save shows when it was saved (not a generic "autosave on"). */
+  function syncRestoredSaveState() {
+    if (DD.store.canUndo() || !DD.persist || typeof DD.persist.load !== 'function') return;
+    const saved = DD.persist.load();
+    if (saved && saved.savedAt && !isNaN(new Date(saved.savedAt).getTime())) setSaveState('saved', saved.savedAt);
+  }
   function initStatusbar() {
     document.getElementById('btn-zoom-in').addEventListener('click', () => call('plan2d', 'zoomBy', ZOOM_STEP));
     document.getElementById('btn-zoom-out').addEventListener('click', () => call('plan2d', 'zoomBy', 1 / ZOOM_STEP));
@@ -2314,16 +2723,24 @@
     const pct = vp ? zoomPercent(vp.scale) : null;
     setText(document.getElementById('status-zoom'), pct == null ? '—' : pct + '%');
   }
-  function syncStatus(u) {
+  const STATUS_3D = {
+    orbit: 'Clique num móvel para selecionar · arraste-o para mover · Q volta à planta 2D',
+    walk: 'Clique na vista para caminhar · Esc sai do modo caminhar · Q volta à planta 2D',
+  };
+  /** Status bar: the active 2D tool, or — in the 3D-only view — the camera mode (2D-only groups hide via CSS). */
+  function syncStatus(u, view) {
+    const is3d = (view || S.appliedView || u.view) === '3d';
     const tool = TOOL_BY_ID[u.tool] || TOOLS[0];
+    const cam = CAM_MODES.find((m) => m.id === u.cam3d) || CAM_MODES[0];
+    const key = is3d ? '3d:' + cam.id : tool.id;
     const toolEl = document.getElementById('status-tool');
-    if (toolEl.getAttribute('data-tool') !== tool.id) {
-      toolEl.setAttribute('data-tool', tool.id);
+    if (toolEl.getAttribute('data-tool') !== key) {
+      toolEl.setAttribute('data-tool', key);
       toolEl.textContent = '';
-      toolEl.appendChild(icon(tool.icon));
-      toolEl.appendChild(document.createTextNode(' ' + (tool.id === 'pan' ? 'Mover a vista' : tool.label)));
+      toolEl.appendChild(icon(is3d ? 'cube' : tool.icon));
+      toolEl.appendChild(document.createTextNode(' ' + (is3d ? 'Vista 3D · ' + cam.label : tool.id === 'pan' ? 'Mover a vista' : tool.label)));
     }
-    setText(document.getElementById('status-hint'), tool.hint);
+    setText(document.getElementById('status-hint'), is3d ? STATUS_3D[cam.id] || STATUS_3D.orbit : tool.hint);
     const show = u.show || {};
     setPressed(document.getElementById('tg-snap'), !!u.snap);
     setPressed(document.getElementById('tg-grid'), !!show.grid);
@@ -2336,8 +2753,14 @@
     if (!box || !txt) return;
     clearTimeout(S.saveTimer);
     box.setAttribute('data-state', state);
-    if (state === 'saved') setText(txt, 'Salvo ' + fmtTime(at || new Date()));
-    else if (state === 'unsaved') setText(txt, 'Alterações não salvas');
+    if (state === 'saved') {
+      const when = at ? new Date(at) : new Date();
+      setText(txt, 'Salvo ' + fmtSavedAt(when, new Date()));
+      box.title = 'Salvo neste navegador em ' + fmtSavedAt(when, new Date(), true);
+      return;
+    }
+    box.removeAttribute('title');
+    if (state === 'unsaved') setText(txt, 'Alterações não salvas');
     else if (state === 'pending') {
       setText(txt, 'Salvando…');
       S.saveTimer = setTimeout(() => setSaveState('unsaved'), SAVE_STALL_MS);
@@ -2378,15 +2801,20 @@
     if (S.drawer === name) closeDrawer(true);
     else openDrawer(name);
   }
+  /**
+   * Focus moves to the drawer's title (tabindex -1), never onto an action such as "Limpar seleção" that Enter
+   * would trigger. On touch nothing is focused: no on-screen keyboard, no focus ring.
+   */
   function openDrawer(name) {
     closeAllMenus();
+    hideTooltip();
     S.drawerReturn = document.activeElement;
     S.drawer = name;
     applyDrawers();
-    const panel = document.getElementById(name);
+    if (S.lastPointerType === 'touch' && !S.keyboardNav) return;
     requestAnimationFrame(() => {
-      const target = name === 'library' ? document.getElementById('lib-search') : focusables(panel)[0];
-      if (target && S.drawer === name) target.focus({ preventScroll: true });
+      const title = document.getElementById(name === 'library' ? 'library-title' : 'inspector-title');
+      if (title && S.drawer === name) title.focus({ preventScroll: true });
     });
   }
   function closeDrawer(returnFocus) {
@@ -2411,9 +2839,28 @@
   // =================================================================== keyboard
   function initKeyboard() {
     document.addEventListener('keydown', onKeyDown);
+    // Close a pending arrow-key nudge before any pointer interaction starts its own gesture (2D or 3D drag,
+    // paint / demolish / measure click): capture phase runs before the canvases' own pointerdown handlers.
+    document.addEventListener('pointerdown', flushNudge, true);
   }
+  const isSaveCombo = (e) => (e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 's';
+  /** Ctrl+S from a field: commit what was typed (blur fires 'change'), save, and give the field its focus back. */
+  function saveFromField(field) {
+    const typing = field && isTypingTarget(field) && typeof field.blur === 'function';
+    if (typing) field.blur();
+    saveNow();
+    if (typing && field.isConnected && typeof field.focus === 'function') field.focus({ preventScroll: true });
+  }
+  /** Document edits a key may trigger: ignored while a pointer drag owns the store gesture (it would be lost). */
+  const EDIT_ACTIONS = { delete: true, duplicate: true, rotate: true, nudge: true, undo: true, redo: true };
   function onKeyDown(e) {
-    if (e.defaultPrevented || document.pointerLockElement || isModalOpen() || S.openMenu) return;
+    if (e.defaultPrevented || isModalOpen() || S.openMenu) return;
+    if (isSaveCombo(e)) {
+      e.preventDefault(); // never the browser's "Save page" dialog, not even from an input
+      if (!e.repeat) saveFromField(document.activeElement);
+      return;
+    }
+    if (document.pointerLockElement) return;
     if (e.key === 'Escape' && S.drawer) {
       e.preventDefault();
       closeDrawer(true);
@@ -2425,12 +2872,19 @@
     if (!action) return;
     e.preventDefault();
     if (e.repeat && !REPEATABLE_ACTIONS[action.type]) return;
+    if (EDIT_ACTIONS[action.type] && pointerGestureActive()) return;
     runAction(action);
+  }
+  /** 2D-only actions in the 3D-only view: nothing would visibly happen, so say how to get back to the plan. */
+  function planOnly() {
+    if (!planHidden()) return false;
+    toast(MSG_PLAN_ONLY, 'info');
+    return true;
   }
   function runAction(a) {
     const fid = () => selectedFurnitureId();
     const handlers = {
-      tool: () => setTool(a.tool),
+      tool: () => planOnly() || setTool(a.tool),
       undo: doUndo,
       redo: doRedo,
       save: saveNow,
@@ -2444,9 +2898,9 @@
         const f = doc().floors[a.index];
         if (f) setFloor(f.id);
       },
-      fit: () => call('plan2d', 'fit'),
-      zoom: () => call('plan2d', 'zoomBy', a.factor),
-      grid: () => toggleShow('grid'),
+      fit: () => (planHidden() ? recenter3D() : call('plan2d', 'fit')),
+      zoom: () => planOnly() || call('plan2d', 'zoomBy', a.factor),
+      grid: () => planOnly() || toggleShow('grid'),
       nudge: () => nudgeSelection(a.dx, a.dy),
     };
     const fn = handlers[a.type];
@@ -2468,7 +2922,7 @@
   function onUIChange(u, prev) {
     if (S.ready && u.view !== S.appliedView) setView(u.view);
     if (u.floor !== prev.floor) syncFloorTabs();
-    if (u.tool !== prev.tool || u.snap !== prev.snap || u.show !== prev.show) syncStatus(u);
+    if (u.tool !== prev.tool || u.snap !== prev.snap || u.show !== prev.show || u.cam3d !== prev.cam3d) syncStatus(u);
     if (u.tool !== prev.tool) syncToolRail(u);
     if (u.tool !== prev.tool || u.paintMaterial !== prev.paintMaterial) syncPaintStrip(u);
     if (u.cam3d !== prev.cam3d || u.showAllFloors !== prev.showAllFloors) syncOverlay(u);
@@ -2484,6 +2938,7 @@
       return;
     }
     S.initialized = true;
+    applyStoredTheme();
     hydrateIcons(document);
     S.el.inspBody = document.getElementById('inspector-body');
     initTooltips();
@@ -2507,6 +2962,7 @@
     }
     const u = ui();
     S.el.stage.setAttribute('data-view', u.view);
+    S.el.app.setAttribute('data-view', u.view);
     syncViewToggle(u.view);
     syncProjectName();
     syncHistory();
@@ -2528,7 +2984,10 @@
     const view = ui().view;
     S.appliedView = view;
     applyViewInstant(view);
+    syncViewContext(view);
     syncZoom();
+    syncRestoredSaveState();
+    syncBackupItem();
     call('materials', 'prewarm');
     S.inspKey = null; // rebuild so thumbnails/material swatches from late modules show up
     refreshInspector();
@@ -2544,11 +3003,16 @@
       parseDecimal,
       parseMM,
       parseMeters,
+      parseLength,
       parseDegrees,
       furnitureEdit,
       thicknessEdit,
       openingWidthEdit,
+      wallFreeSpan,
       findFreeT,
+      viewportShowsBox,
+      punctuate,
+      fmtSavedAt,
       slug,
       floorTabLabel,
       formatCursor,
@@ -2560,6 +3024,8 @@
       keyToAction,
       nextView,
       LIMITS,
+      STYLE_MAX,
+      WALL_KIND,
     },
   };
 })();

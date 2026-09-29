@@ -54,6 +54,7 @@
     upperCabinet: { w: 1200, d: 350, h: 700, elev: 1500, color: '#EDEAE4' },
     island: { w: 1600, d: 900, h: 900, color: '#EDEAE4' },
     washer: { w: 600, d: 650, h: 850, color: '#F2F2F0' },
+    tanque: { w: 600, d: 550, h: 900, color: '#D9D6CF', fixture: true },
     shelves: { w: 900, d: 400, h: 1800, color: '#8A8F94' },
     toilet: { w: 380, d: 650, h: 780, color: '#F4F3F0', fixture: true },
     basin: { w: 800, d: 460, h: 850, color: '#F4F3F0', fixture: true },
@@ -96,6 +97,7 @@
     ember: '#F08A3C',
     plateBlue: '#1F4E9A',
     concrete: '#A39C92',
+    soapBlue: '#4F8FC0',
   };
   const PILLOW_COLORS = ['#D8CBB3', '#C27A4A'];
   const OUTDOOR_PILLOWS = ['#E7E1D5', '#C98B5A'];
@@ -104,7 +106,8 @@
   const FLOWER_COLORS = ['#F2D06B', '#E07A5F', '#F4F1EA'];
 
   // Material presets. `glass` = transparent MeshPhysicalMaterial (no transmission).
-  // Metalness is kept moderate so metals still read well without an environment map.
+  // `env` = intensity of the small procedural reflection environment (see reflectionEnv): the scene has no
+  // environment map, so without it metals only reflect black and chrome taps / handles render nearly black.
   // `closedShell`: double-sided material used on closed meshes → shadows rendered from back faces only
   // (avoids shadow acne that DoubleSide shadow casting causes).
   const MATERIAL_PRESETS = {
@@ -113,21 +116,21 @@
     soft: { roughness: 0.97, metalness: 0 },
     paper: { roughness: 0.82, metalness: 0 },
     wood: { roughness: 0.6, metalness: 0 },
-    lacquer: { roughness: 0.32, metalness: 0 },
-    paint: { roughness: 0.3, metalness: 0.3 },
+    lacquer: { roughness: 0.32, metalness: 0, env: 0.25 },
+    paint: { roughness: 0.3, metalness: 0.3, env: 0.6 },
     plastic: { roughness: 0.5, metalness: 0 },
-    stone: { roughness: 0.28, metalness: 0.02 },
+    stone: { roughness: 0.28, metalness: 0.02, env: 0.35 },
     concrete: { roughness: 0.92, metalness: 0 },
-    ceramic: { roughness: 0.14, metalness: 0, doubleSide: true, closedShell: true },
-    metal: { roughness: 0.42, metalness: 0.55 },
-    steel: { roughness: 0.34, metalness: 0.45 },
-    chrome: { roughness: 0.16, metalness: 0.75 },
+    ceramic: { roughness: 0.14, metalness: 0, doubleSide: true, closedShell: true, env: 0.3 },
+    metal: { roughness: 0.42, metalness: 0.55, env: 0.8 },
+    steel: { roughness: 0.34, metalness: 0.45, env: 0.9 },
+    chrome: { roughness: 0.16, metalness: 0.75, env: 1 },
     rubber: { roughness: 0.9, metalness: 0 },
     brick: { roughness: 0.96, metalness: 0 },
     terracotta: { roughness: 0.9, metalness: 0 },
     foliage: { roughness: 0.72, metalness: 0, flatShading: true, doubleSide: true, closedShell: true },
-    screen: { roughness: 0.07, metalness: 0.2 },
-    darkGlass: { roughness: 0.08, metalness: 0.35 },
+    screen: { roughness: 0.07, metalness: 0.2, env: 0.5 },
+    darkGlass: { roughness: 0.08, metalness: 0.35, env: 0.7 },
     light: { roughness: 0.4, metalness: 0, emissive: 0.85 },
     shade: { roughness: 0.9, metalness: 0, emissive: 0.35, emissiveColor: '#FFC98A', doubleSide: true },
     glass: { glass: true },
@@ -228,6 +231,51 @@
     return r;
   }
 
+  /** Vertical gradient stops [t (0 = top, 1 = bottom), colour] of the procedural reflection environment. */
+  const ENV_SIDE = [[0, '#C9D8E6'], [0.46, '#F4F1EA'], [0.5, '#D8CFC2'], [1, '#6E665C']];
+  const ENV_FACE_PX = 32;
+
+  function envFace(side, top) {
+    const c = document.createElement('canvas');
+    c.width = c.height = ENV_FACE_PX;
+    const g = c.getContext('2d');
+    if (side === 'side') {
+      const grad = g.createLinearGradient(0, 0, 0, ENV_FACE_PX);
+      ENV_SIDE.forEach((st) => grad.addColorStop(st[0], st[1]));
+      g.fillStyle = grad;
+    } else {
+      g.fillStyle = top ? '#EEF3F8' : '#5E574E';
+    }
+    g.fillRect(0, 0, ENV_FACE_PX, ENV_FACE_PX);
+    if (side === 'side') {
+      g.fillStyle = 'rgba(255,255,255,0.85)'; // a soft window highlight gives chrome a readable glint
+      g.fillRect(ENV_FACE_PX * 0.3, ENV_FACE_PX * 0.12, ENV_FACE_PX * 0.22, ENV_FACE_PX * 0.3);
+    }
+    return c;
+  }
+
+  /**
+   * Tiny sky/horizon/floor cube map shared by glossy furniture materials (per three.js instance). Null outside a
+   * browser (Node tests) or if canvases are unavailable — materials then simply have no reflections.
+   */
+  function reflectionEnv(THREE) {
+    const res = resourcesFor(THREE);
+    if (res.env !== undefined) return res.env;
+    res.env = null;
+    try {
+      if (typeof document === 'undefined' || typeof THREE.CubeTexture !== 'function') return null;
+      const faces = [envFace('side'), envFace('side'), envFace('cap', true), envFace('cap', false), envFace('side'), envFace('side')];
+      const tex = new THREE.CubeTexture(faces);
+      if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      tex.userData.shared = true;
+      res.env = tex;
+    } catch (e) {
+      res.env = null;
+    }
+    return res.env;
+  }
+
   function createMaterial(THREE, kind, hex) {
     const p = MATERIAL_PRESETS[kind] || MATERIAL_PRESETS.plastic;
     let m;
@@ -252,6 +300,13 @@
         side: p.doubleSide ? THREE.DoubleSide : THREE.FrontSide,
       });
       if (p.closedShell) m.shadowSide = THREE.BackSide;
+      if (p.env) {
+        const env = reflectionEnv(THREE);
+        if (env) {
+          m.envMap = env;
+          m.envMapIntensity = p.env;
+        }
+      }
       if (p.emissive) {
         m.emissive.set(p.emissiveColor || hex);
         m.emissiveIntensity = p.emissive;
@@ -1503,6 +1558,100 @@
     K.cyl(K.mat('darkGlass', '#2A3238'), R * 0.9, R * 0.9, 0.02, [0, cy, zf + 0.012], { rot: [HALF_PI, 0, 0], center: true, seg: 24 });
   }
 
+  /**
+   * Tanque (laundry sink) on a pedestal: open ceramic basin whose back half is the bowl (drain) and whose front
+   * half is the ribbed washboard sloping down into the bowl; wall tap with hose nozzle above the back edge.
+   */
+  function buildTanque(K) {
+    const { w, d, h } = K;
+    const m = tanqueMetrics(K);
+    const ceramic = K.mat('ceramic', K.color);
+    tanquePedestal(K, m);
+    // basin shell: side walls full depth, back/front walls between them, floor slab inside
+    for (const s of [-1, 1]) K.box(ceramic, [m.t, h - m.yb, d], [s * (w / 2 - m.t / 2), m.yb, 0], { r: m.r, part: 'basin' });
+    for (const s of [-1, 1]) K.box(ceramic, [m.wi, h - m.yb, m.t], [0, m.yb, s * (d / 2 - m.t / 2)], { r: m.r, part: 'basin' });
+    K.box(ceramic, [m.wi, m.tb, d - 2 * m.t], [0, m.yb, 0], { part: 'basin' });
+    tanqueWashboard(K, m);
+    const chrome = K.mat('chrome', C.chrome);
+    const drainR = clamp(m.wi * 0.07, 0.015, 0.04);
+    K.cyl(chrome, drainR, drainR, 0.004, [0, m.yf, m.zBowl], { seg: 14, part: 'drain' });
+    K.cyl(K.mat('metal', '#3A3D40'), drainR * 0.6, drainR * 0.6, 0.005, [0, m.yf, m.zBowl], { seg: 10, part: 'drain' });
+    tanqueTap(K, m, chrome);
+  }
+
+  function tanqueMetrics(K) {
+    const { w, d, h } = K;
+    const t = clamp(Math.min(w, d) * 0.06, 0.02, 0.05);
+    const basinH = Math.min(clamp(h * 0.3, 0.12, 0.32), h * 0.6);
+    const yb = h - basinH;
+    const tb = clamp(basinH * 0.15, 0.015, 0.05);
+    const zi0 = -d / 2 + t, zi1 = d / 2 - t;
+    const zWash = zi1 - (zi1 - zi0) * 0.5; // back end of the washboard = front of the bowl
+    return {
+      t, tb, yb, basinH,
+      r: Math.min(0.003, t / 2), // small: adjoining rounded walls would show grooves at the corners
+      wi: w - 2 * t,
+      yf: yb + tb,
+      zi0, zi1, zWash,
+      zBowl: (zi0 + zWash) / 2,
+      yFront: h - Math.min(0.03, basinH * 0.15),
+      yBack: yb + tb + (h - yb - tb) * 0.55,
+    };
+  }
+
+  function tanquePedestal(K, m) {
+    const { w, d } = K;
+    const mat = K.mat('ceramic', tone(K.color, -0.05));
+    const bw = Math.min(w * 0.52, m.wi), bd = d * 0.62;
+    const zc = -d / 2 + bd / 2 + 0.01;
+    const footH = Math.min(0.02, m.yb * 0.1);
+    K.box(mat, [bw + 0.02, footH, bd + 0.02], [0, 0, zc], { r: Math.min(0.008, footH / 2), part: 'pedestal' });
+    K.frustum(mat, [bw, bd], 0.82, m.yb + 0.003 - footH, [0, footH, zc], { part: 'pedestal' });
+  }
+
+  /** Sloped washboard (rising towards +Z) with half-round ribs across the width, plus the apron under its back end. */
+  function tanqueWashboard(K, m) {
+    const ceramic = K.mat('ceramic', K.color);
+    const ribMat = K.mat('ceramic', tone(K.color, -0.1));
+    const dz = m.zi1 - m.zWash, dy = m.yFront - m.yBack;
+    const a = Math.atan2(dy, dz);
+    const len = Math.hypot(dz, dy);
+    const nY = Math.cos(a), nZ = -Math.sin(a); // surface normal (up and towards the bowl)
+    const ts = 0.02;
+    const span = m.wi + 0.004; // ends tucked 2 mm into the side walls (no coplanar faces)
+    const at = (s, off) => [0, m.yBack + dy * s + nY * off, m.zWash + dz * s + nZ * off];
+    const mid = at(0.5 + 0.005 / len, -ts / 2);
+    K.box(ceramic, [span, ts, len + 0.01], mid, { center: true, rot: [-a, 0, 0], part: 'washboard' });
+    K.box(ceramic, [span, Math.max(0.01, m.yBack - m.yf), 0.012], [0, m.yf, m.zWash + 0.006], { part: 'washboard' });
+    const ribR = clamp(len * 0.022, 0.003, 0.007);
+    const n = clamp(Math.round(len / 0.024), 4, 16);
+    for (let i = 1; i < n; i++) {
+      K.cyl(ribMat, ribR, ribR, m.wi - 0.02, at(i / n, ribR * 0.25), { rot: [0, 0, HALF_PI], center: true, seg: 6, part: 'washboard' });
+    }
+    if (m.wi > 0.3 && len > 0.12) {
+      const soap = at(0.72, ribR + 0.011);
+      K.box(K.mat('plastic', C.soapBlue), [0.075, 0.022, 0.05], [m.wi / 2 - 0.07, soap[1], soap[2]], { center: true, r: 0.006, rot: [-a, 0.25, 0] });
+    }
+  }
+
+  /** Wall tap ("torneira de parede") on the wall behind the bowl: flange, body, butterfly handle, hose nozzle. */
+  function tanqueTap(K, m, chrome) {
+    const { d, h } = K;
+    const zWall = -d / 2;
+    const y = h + clamp(h * 0.14, 0.06, 0.16);
+    const reach = clamp(m.zBowl - zWall, 0.06, 0.16);
+    const zEnd = zWall + reach;
+    const alongZ = { rot: [HALF_PI, 0, 0], center: true };
+    K.cyl(chrome, 0.03, 0.03, 0.01, [0, y, zWall + 0.005], Object.assign({ seg: 14, part: 'tap' }, alongZ));
+    K.cyl(chrome, 0.013, 0.013, reach - 0.01, [0, y, zWall + 0.01 + (reach - 0.01) / 2], Object.assign({ seg: 10, part: 'tap' }, alongZ));
+    const zValve = zWall + Math.min(0.05, reach * 0.45);
+    K.cyl(chrome, 0.018, 0.02, 0.045, [0, y - 0.015, zValve], { seg: 10, part: 'tap' });
+    K.box(chrome, [0.06, 0.01, 0.012], [0, y + 0.03, zValve], { r: 0.004, part: 'tap' });
+    K.sphere(chrome, 0.014, [0, y, zEnd], { smooth: true, part: 'tap' });
+    K.cyl(chrome, 0.012, 0.013, 0.04, [0, y - 0.04, zEnd], { seg: 10, part: 'tap' });
+    for (let i = 0; i < 3; i++) K.cyl(chrome, 0.009, 0.011, 0.01, [0, y - 0.07 + i * 0.01, zEnd], { seg: 10, part: 'tap' });
+  }
+
   function buildMetalShelves(K) {
     const { w, d, h } = K;
     const metal = K.mat('metal', K.color);
@@ -2048,6 +2197,7 @@
     upperCabinet: buildUpperCabinet,
     island: buildIsland,
     washer: buildWasher,
+    tanque: buildTanque,
     shelves: buildMetalShelves,
     toilet: buildToilet,
     basin: buildBasin,

@@ -31,11 +31,13 @@
 
   // Wall helpers. kind: structural | partition | muro | railing
   const KIND_HEIGHT = { structural: 2880, partition: 2880, muro: 1800, railing: 1000 };
-  function W(id, floor, x1, y1, x2, y2, kind, thick) {
-    return { id, floor, a: { x: x1, y: y1 }, b: { x: x2, y: y2 }, thick: thick || 150, height: KIND_HEIGHT[kind], kind };
+  // extra: optional overrides, e.g. { height } or { mureta } (solid base height of a railing, mm)
+  function W(id, floor, x1, y1, x2, y2, kind, thick, extra) {
+    return Object.assign({ id, floor, a: { x: x1, y: y1 }, b: { x: x2, y: y2 }, thick: thick || 150, height: KIND_HEIGHT[kind], kind }, extra || {});
   }
-  const H = (id, floor, y, x1, x2, kind, t) => W(id, floor, x1, y, x2, y, kind, t);
-  const V = (id, floor, x, y1, y2, kind, t) => W(id, floor, x, y1, x, y2, kind, t);
+  const H = (id, floor, y, x1, x2, kind, t, extra) => W(id, floor, x1, y, x2, y, kind, t, extra);
+  const V = (id, floor, x, y1, y2, kind, t, extra) => W(id, floor, x, y1, x, y2, kind, t, extra);
+  const MURO_TERREO = { height: 2000 }; // cortes: boundary walls 2,00 m on the ground (1,80 m on the terrace)
 
   // Opening helper. t = distance (mm) from wall.a to the opening centre.
   // hinge: 'start' | 'end' (jamb nearer wall.a / wall.b); side: +1 swings/slides towards the wall's
@@ -65,13 +67,13 @@
     H('w0_lavBottom', 'f0', 10425, 1500, 4300, 'structural'),
     V('w0_lavRight', 'f0', 3075, 8675, 10425, 'structural'),
     V('w0_garagemEsq', 'f0', 75, 10500, 16200, 'structural'),
-    // muros de divisa (A = 1,80 m)
-    H('m0_fundos', 'f0', 75, 0, 9000, 'muro'),
-    V('m0_esqFundos', 'f0', 75, 0, 10500, 'muro'),
-    V('m0_dirFundos', 'f0', 8925, 0, 8000, 'muro'),
-    V('m0_esqFrente', 'f0', 75, 16200, 20000, 'muro'),
-    V('m0_dirFrente', 'f0', 8925, 16200, 20000, 'muro'),
-    H('m0_frente', 'f0', 19925, 0, 9000, 'muro'),
+    // muros de divisa (A = 2,00 m no térreo, conforme os cortes)
+    H('m0_fundos', 'f0', 75, 0, 9000, 'muro', 150, MURO_TERREO),
+    V('m0_esqFundos', 'f0', 75, 0, 10500, 'muro', 150, MURO_TERREO),
+    V('m0_dirFundos', 'f0', 8925, 0, 8000, 'muro', 150, MURO_TERREO),
+    V('m0_esqFrente', 'f0', 75, 16200, 20000, 'muro', 150, MURO_TERREO),
+    V('m0_dirFrente', 'f0', 8925, 16200, 20000, 'muro', 150, MURO_TERREO),
+    H('m0_frente', 'f0', 19925, 0, 9000, 'muro', 150, MURO_TERREO),
 
     // ---------------- 1º PAVIMENTO (f1) ----------------
     H('w1_back', 'f1', 2925, 1500, 7500, 'structural'),
@@ -87,7 +89,8 @@
     V('w1_quartosDiv', 'f1', 4225, 10425, 14925, 'partition'),
     V('w1_esq', 'f1', 75, 10350, 16200, 'structural'),
     H('w1_front', 'f1', 14925, 0, 8925, 'structural'),
-    H('w1_guardaCorpo', 'f1', 16125, 150, 8850, 'railing'),
+    // "Guarda corpo A=0,90 / Mureta A=0,30" → top rail at 1,20 m over a 0,30 m mureta
+    H('w1_guardaCorpo', 'f1', 16125, 150, 8850, 'railing', 150, { height: 1200, mureta: 300 }),
 
     // ---------------- 2º PAVIMENTO (f2) ----------------
     H('w2_back', 'f2', 2925, 1500, 7500, 'structural'),
@@ -100,8 +103,11 @@
     H('w2_front', 'f2', 10425, 1500, 9000, 'structural'),
     V('m2_esq', 'f2', 75, 10350, 15000, 'muro'),
     V('m2_dir', 'f2', 8925, 10500, 15000, 'muro'),
-    H('w2_guardaCorpoFrente', 'f2', 14925, 150, 8850, 'railing'),
-    H('w2_guardaCorpoFundo', 'f2', 10425, 0, 1500, 'railing'),
+    // terraço: platibanda 0,80 m + guarda-corpo preto (corte longitudinal / fachada)
+    H('w2_guardaCorpoFrente', 'f2', 14925, 150, 8850, 'railing', 150, { height: 1100, mureta: 800 }),
+    H('w2_guardaCorpoFundo', 'f2', 10425, 0, 1500, 'railing', 150, { height: 1100, mureta: 800 }),
+    // guard on the open side of the stair void (drop onto the flight below)
+    V('w2_guardaEscada', 'f2', 6125, 9550, 10425, 'railing', 50, { height: 1000, mureta: 0 }),
   ];
 
   const openings = [
@@ -110,7 +116,7 @@
     O('o0_j1_desp', 'w0_back', 'J1', 3170),
     O('o0_j1_suite', 'w0_back', 'J1', 4450),
     O('o0_j2_coz', 'w0_left', 'J2', 2150),
-    O('o0_j1_lav', 'w0_left', 'J1', 7050),
+    O('o0_j1_lav', 'w0_left', 'J1', 7100),
     O('o0_j2_quarto', 'w0_right', 'J2', 3000),
     O('o0_p1_quarto', 'w0_salaTop', 'P1', 2675, { hinge: 'end', side: -1 }),
     O('o0_j5_escada', 'w0_salaTop', 'J5', 4025),
@@ -122,9 +128,9 @@
     O('o0_j7_b', 'w0_salaFront', 'J7', 2150),
     O('o0_j4_sala', 'w0_salaFront', 'J4', 3600),
     O('o0_p1_garagem', 'w0_lavBottom', 'P1', 2150, { hinge: 'start', side: -1 }),
-    O('o0_p2_lav', 'w0_lavRight', 'P2', 500, { hinge: 'end', side: 1 }),
+    O('o0_p2_lav', 'w0_lavRight', 'P2', 500, { hinge: 'start', side: 1 }),
     O('o0_p8_portao', 'm0_frente', 'P8', 2400, { side: -1 }),
-    O('o0_p7_portao', 'm0_frente', 'P7', 5700, { hinge: 'start', side: -1 }),
+    O('o0_p7_portao', 'm0_frente', 'P7', 5770, { hinge: 'start', side: -1 }),
     // 1º pavimento
     O('o1_j6_closetE', 'w1_left', 'J6', 1150),
     O('o1_j3_suite', 'w1_left', 'J3', 3250),
@@ -182,10 +188,10 @@
     { id: 's0_garagemFrente', floor: 'f0', a: { x: 150, y: 15000 }, b: { x: 4150, y: 15000 } },
   ];
 
-  // U-shaped stair (15 treads of 27 cm, landing at the far end). `floor` = the floor it rises from.
+  // U-shaped stair: 16 risers of 18 cm, treads of 27 cm, landing (step 8) at 1,44 m. `floor` = the floor it rises from.
   const stairs = [
-    { id: 'st0', floor: 'f0', x: 6150, y: 8750, length: 2700, width: 1600, tread: 270, lowerCount: 8, upperCount: 7 },
-    { id: 'st1', floor: 'f1', x: 6150, y: 8750, length: 2700, width: 1600, tread: 270, lowerCount: 8, upperCount: 7 },
+    { id: 'st0', floor: 'f0', x: 6150, y: 8750, length: 2700, width: 1600, tread: 270, lowerCount: 7, upperCount: 7 },
+    { id: 'st1', floor: 'f1', x: 6150, y: 8750, length: 2700, width: 1600, tread: 270, lowerCount: 7, upperCount: 7 },
   ];
 
   // Ground-level site surfaces (decorative; drawn under the plan on the Térreo and as ground in 3D).
@@ -197,7 +203,7 @@
       { id: 'z_grama', kind: 'grass', x: 0, y: 0, w: 9000, h: 20000 },
       { id: 'z_calcadaFundos', kind: 'paving', x: 150, y: 2050, w: 8700, h: 800 },
       { id: 'z_calcadaEsq', kind: 'paving', x: 150, y: 2850, w: 1350, h: 7650 },
-      { id: 'z_calcadaDir', kind: 'paving', x: 7500, y: 2850, w: 1350, h: 5150 },
+      { id: 'z_calcadaDir', kind: 'paving', x: 7500, y: 2850, w: 650, h: 5150 },
       { id: 'z_coberta', kind: 'paving', x: 150, y: 15000, w: 8700, h: 1200 },
       { id: 'z_rampa', kind: 'driveway', x: 650, y: 16200, w: 3500, h: 3650 },
       { id: 'z_acesso', kind: 'paving', x: 4850, y: 16200, w: 1900, h: 3650 },

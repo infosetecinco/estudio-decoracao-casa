@@ -64,14 +64,24 @@
   const DIM_EXT_GAP_PX = 8;
   const TAG_MIN_SCALE = 0.03;
   const TAG_GAP_PX = 16;
+  const TAG_CROWDED_SCALE = 0.06; // below this a tag that still collides after every retry is skipped
   const ROOM_FILL_ALPHA = 0.6;
+  const LABEL_PAD_PX = 5; // clearance around a room label box
+  const LABEL_MAX_CANDIDATES = 90; // per axis, when searching a free spot for a room label
+  const ROOM_NAME_PAD_PX = 10; // a room name never gets wider than the room minus this
+  const MEASURE_HIT_PX = 5;
+  const JAMB_MARGIN_MM = 0; // clearance between an opening and a wall crossing its wall
+  const WALL_TOOL_REACH_MM = 5000; // wall tool points stay within the lot ± this
   const SIDEWALK_MM = 2000;
   const ROAD_MM = 7000;
   const STREET_SPAN_MM = 7000; // street band extends this far left/right of the lot
   const STREET_NAME_AT = 0.22; // street name position across the road band (0 = kerb)
-  const EXPORT_PX_PER_MM = 0.1; // 1 px per 10 mm
+  const EXPORT_PX_PER_MM = 0.1; // layout unit: 1 css px per 10 mm (times the export scale factor)
   const EXPORT_MARGIN_PX = 96;
-  const EXPORT_FOOTER_PX = 104;
+  const EXPORT_MAX_SIDE_PX = 4000; // longest side of the exported PNG
+  const EXPORT_TITLE_H = 82; // title row of the export footer (title, project, source line)
+  const EXPORT_ROW_H = 17; // one row of the room schedule / legend
+  const EXPORT_SCHEDULE_COL_W = 230;
   const WHEEL_ZOOM_K = 0.0015;
   const ZOOM_EASE = 0.3;
   const FIT_ANIM_MS = 320;
@@ -330,9 +340,29 @@
     });
     return best;
   }
-  function hitMeasure(doc, floorId, p, tol) {
+  /** Label of a measure / dimension line: text and the side it sits on (screen normal pointing up / left). */
+  const measureText = (a, b) => U.fmtM(U.dist(a, b)) + ' m';
+  function measureLabelNormal(a, b) {
+    const u = unit(a, b);
+    const n = { x: -u.y, y: u.x };
+    return n.y > 0 || (n.y === 0 && n.x > 0) ? { x: -n.x, y: -n.y } : n;
+  }
+  const MEASURE_LABEL_OFFSET_PX = 13;
+  const PILL_H_PX = 18;
+  /** Approximate pill width (css px) of a JetBrains Mono 10.5 px label. */
+  const pillWidthPx = (text) => text.length * 6.4 + 12;
+  /** Measure under p: on its line (within `tol` mm) or on its label pill (px = mm per css px). Topmost first. */
+  function hitMeasure(doc, floorId, p, tol, px) {
     const ms = (doc.measures || []).filter((m) => m.floor === floorId);
-    for (let i = ms.length - 1; i >= 0; i--) if (U.segDist(p, ms[i].a, ms[i].b).d <= tol) return ms[i];
+    for (let i = ms.length - 1; i >= 0; i--) {
+      const m = ms[i];
+      if (U.segDist(p, m.a, m.b).d <= tol) return m;
+      if (!px || U.dist(m.a, m.b) / px <= 24) continue; // label hidden on very short measures
+      const n = measureLabelNormal(m.a, m.b);
+      const c = { x: (m.a.x + m.b.x) / 2 + n.x * MEASURE_LABEL_OFFSET_PX * px, y: (m.a.y + m.b.y) / 2 + n.y * MEASURE_LABEL_OFFSET_PX * px };
+      const hw = (pillWidthPx(measureText(m.a, m.b)) / 2) * px, hh = (PILL_H_PX / 2) * px;
+      if (Math.abs(p.x - c.x) <= hw && Math.abs(p.y - c.y) <= hh) return m;
+    }
     return null;
   }
   function hitWallEnd(w, p, tol) {
@@ -349,8 +379,10 @@
     }
   }
   /**
-   * Select-tool hit test, in priority order: handles of the selected item, endpoints of the selected partition,
-   * furniture (topmost non-flat, then flat), openings, walls, measures, rooms.
+   * Select-tool hit test. The priority follows the draw order (what is drawn on top is picked first):
+   * handles of the selected item, endpoints of the selected partition, measures (line or label; drawn above
+   * everything), openings / walls that contain p exactly (drawn over furniture), furniture (topmost non-flat,
+   * then flat, with a few px of tolerance), openings / walls within the tolerance, rooms.
    * → { kind: 'handle'|'wallEnd'|'furniture'|'opening'|'wall'|'measure'|'room', id, handle?, end? } | null
    */
   function hitTestSelect(doc, floorId, p, px, opts) {
@@ -368,17 +400,23 @@
       const end = w && w.floor === floorId && OPS.isEditableWall(w) ? hitWallEnd(w, p, (HANDLE_PX / 2 + 3) * px) : null;
       if (end) return { kind: 'wallEnd', id: w.id, end };
     }
+    const m = hitMeasure(doc, floorId, p, MEASURE_HIT_PX * px, px);
+    if (m) return { kind: 'measure', id: m.id };
+    const exact = hitWallOrOpening(doc, floorId, p, 0);
+    if (exact) return exact;
     const it = showFurniture ? hitFurniture(doc, floorId, p, tol) : null;
     if (it) return { kind: 'furniture', id: it.id };
-    const op = hitOpening(doc, floorId, p, tol);
-    if (op) return { kind: 'opening', id: op.id };
-    const w = hitWall(doc, floorId, p, tol);
-    if (w) return { kind: 'wall', id: w.id };
-    const m = hitMeasure(doc, floorId, p, 5 * px);
-    if (m) return { kind: 'measure', id: m.id };
+    const near = hitWallOrOpening(doc, floorId, p, tol);
+    if (near) return near;
     const r = safeRoomAt(doc, floorId, p.x, p.y);
     if (r) return { kind: 'room', id: r.id };
     return null;
+  }
+  function hitWallOrOpening(doc, floorId, p, tol) {
+    const op = hitOpening(doc, floorId, p, tol);
+    if (op) return { kind: 'opening', id: op.id };
+    const w = hitWall(doc, floorId, p, tol);
+    return w ? { kind: 'wall', id: w.id } : null;
   }
   function refOf(h) {
     if (!h) return null;
@@ -420,18 +458,66 @@
       { x: p0.x - n.x * h, y: p0.y - n.y * h },
     ];
   }
-  /** Allowed range of an opening's centre `t` on its wall (wall ends and neighbouring openings). */
-  function openingRange(doc, op, w) {
+  /** Clip a convex polygon (in a wall's local s/u frame) to the half-plane k·u ≤ h. */
+  function clipHalf(poly, k, h) {
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const ina = k * a.u <= h, inb = k * b.u <= h;
+      if (ina) out.push(a);
+      if (ina !== inb) {
+        const t = (h - k * a.u) / (k * (b.u - a.u));
+        out.push({ s: a.s + t * (b.s - a.s), u: a.u + t * (b.u - a.u) });
+      }
+    }
+    return out;
+  }
+  /**
+   * Stretches [s0,s1] of wall w (distance from w.a) covered by other walls of its floor — the crossing / butting
+   * walls at its joints. An opening must stay clear of them (a door cut would eat the other wall).
+   */
+  function wallObstacles(doc, w) {
+    const { d, n, L } = G.wallDir(w);
+    const h = w.thick / 2 - 1;
+    const out = [];
+    doc.walls.forEach((o) => {
+      if (o.id === w.id || o.floor !== w.floor) return;
+      const local = G.wallPolygon(o).map((p) => {
+        const rx = p.x - w.a.x, ry = p.y - w.a.y;
+        return { s: rx * d.x + ry * d.y, u: rx * n.x + ry * n.y };
+      });
+      const clipped = clipHalf(clipHalf(local, 1, h), -1, h);
+      if (clipped.length < 3) return;
+      const ss = clipped.map((q) => q.s);
+      const s0 = Math.max(0, Math.min(...ss)), s1 = Math.min(L, Math.max(...ss));
+      if (s1 - s0 > 0.5) out.push([s0, s1]);
+    });
+    return out;
+  }
+  /**
+   * Allowed range of an opening's centre `t` on wall `w`: wall ends, walls crossing or butting into it (its
+   * joints) and neighbouring openings. Obstacles are taken on the side of the current `t` (`opT`, default op.t).
+   */
+  function openingRange(doc, op, w, opT) {
     const L = G.wallDir(w).L;
+    const t0 = opT == null ? op.t : opT;
+    const half = op.width / 2 + JAMB_MARGIN_MM;
     let lo = op.width / 2, hi = L - op.width / 2;
+    wallObstacles(doc, w).forEach(([s0, s1]) => {
+      if (s1 <= t0) lo = Math.max(lo, s1 + half);
+      else if (s0 >= t0) hi = Math.min(hi, s0 - half);
+    });
     doc.openings.forEach((o) => {
-      if (o.wall !== op.wall || o.id === op.id) return;
-      if (o.t < op.t) lo = Math.max(lo, o.t + o.width / 2 + op.width / 2);
+      if (o.wall !== w.id || o.id === op.id) return;
+      if (o.t < t0) lo = Math.max(lo, o.t + o.width / 2 + op.width / 2);
       else hi = Math.min(hi, o.t - o.width / 2 - op.width / 2);
     });
     return { lo, hi };
   }
-  /** After an endpoint edit, keep each opening of the wall at the same world position (clamped to the wall). */
+  /**
+   * After an endpoint edit, keep each opening of the wall at the same world position, clamped to the new wall
+   * and clear of the walls at its joints (`doc` already holds the edited wall).
+   */
   function retargetOpenings(doc, oldWall, newWall) {
     const od = G.wallDir(oldWall), nd = G.wallDir(newWall);
     let changed = false;
@@ -439,13 +525,31 @@
       if (op.wall !== oldWall.id) return op;
       const c = { x: oldWall.a.x + od.d.x * op.t, y: oldWall.a.y + od.d.y * op.t };
       let t = (c.x - newWall.a.x) * nd.d.x + (c.y - newWall.a.y) * nd.d.y;
-      const lo = op.width / 2, hi = nd.L - op.width / 2;
-      t = Math.round(hi >= lo ? U.clamp(t, lo, hi) : nd.L / 2);
+      const r = openingRange(doc, op, newWall, t);
+      t = Math.round(r.hi >= r.lo ? U.clamp(t, r.lo, r.hi) : nd.L / 2);
       if (t === op.t) return op;
       changed = true;
       return Object.assign({}, op, { t });
     });
     return changed ? Object.assign({}, doc, { openings }) : doc;
+  }
+  /**
+   * Opening of another wall that a partition end at `p` would run into (the partition's thickness `thick`
+   * overlaps the opening where it butts into that wall), or null. Used to keep joints out of doors & windows.
+   */
+  function jointOpeningClash(doc, floorId, p, thick, excludeId) {
+    for (const o of doc.walls) {
+      if (o.floor !== floorId || o.id === excludeId) continue;
+      const { d, n, L } = G.wallDir(o);
+      const rx = p.x - o.a.x, ry = p.y - o.a.y;
+      const s = rx * d.x + ry * d.y, u = rx * n.x + ry * n.y;
+      if (Math.abs(u) > o.thick / 2 + 6 || s < -thick / 2 || s > L + thick / 2) continue;
+      const hit = doc.openings.find(
+        (op) => op.wall === o.id && s + thick / 2 > op.t - op.width / 2 + 1 && s - thick / 2 < op.t + op.width / 2 - 1
+      );
+      if (hit) return hit;
+    }
+    return null;
   }
 
   // ================================================================== pure helpers: point snapping (walls, measures)
@@ -463,22 +567,103 @@
     if (axis === 'v') return { x: anchor.x, y: q.y };
     return { x: q.x, y: q.y };
   }
-  function wallSnapCandidates(w) {
-    const pts = [{ x: w.a.x, y: w.a.y, kind: 'end' }, { x: w.b.x, y: w.b.y, kind: 'end' }];
-    G.wallPolygon(w).forEach((p) => pts.push({ x: p.x, y: p.y, kind: 'corner' }));
+  /**
+   * Point test for the drawn wall union (cut plane): inside some wall rectangle and not inside one of that
+   * wall's cut openings (doors / low windows are drawn as gaps).
+   */
+  function makeSolidTest(walls, openings) {
+    const cuts = new Map();
+    openings.forEach((op) => {
+      if (!cutsWall(op)) return;
+      const list = cuts.get(op.wall) || [];
+      list.push([op.t - op.width / 2, op.t + op.width / 2]);
+      cuts.set(op.wall, list);
+    });
+    const frames = walls.map((w) => Object.assign({ w, h: w.thick / 2, cuts: cuts.get(w.id) || [] }, G.wallDir(w)));
+    return (p) =>
+      frames.some((f) => {
+        const rx = p.x - f.w.a.x, ry = p.y - f.w.a.y;
+        const s = rx * f.d.x + ry * f.d.y, u = rx * f.n.x + ry * f.n.y;
+        if (s <= 0 || s >= f.L || u <= -f.h || u >= f.h) return false;
+        return !f.cuts.some((c) => s > c[0] && s < c[1]);
+      });
+  }
+  const CORNER_PROBE_MM = 2;
+  const JAMB_SNAP_WEIGHT = 1.5; // a jamb corner must be clearly closer than a room corner to win
+  const PROBE_DIRS = Array.from({ length: 8 }, (_, k) => {
+    const a = ((22.5 + 45 * k) * Math.PI) / 180;
+    return { x: Math.cos(a), y: Math.sin(a) };
+  });
+  /**
+   * Classify p against the wall union by probing a tiny circle around it: 'corner' (the outline turns there —
+   * a real, visible room or wall corner), 'edge' (on a straight face), 'inside' (buried in a joint), 'outside'.
+   */
+  function classifyPoint(solid, p) {
+    const inside = PROBE_DIRS.map((d) => solid({ x: p.x + d.x * CORNER_PROBE_MM, y: p.y + d.y * CORNER_PROBE_MM }));
+    const count = inside.filter(Boolean).length;
+    if (count === 0) return 'outside';
+    if (count === 8) return 'inside';
+    let flips = 0;
+    for (let i = 0; i < 8; i++) if (inside[i] !== inside[(i + 1) % 8]) flips++;
+    return flips === 2 && count === 4 ? 'edge' : 'corner';
+  }
+  /**
+   * Snap points of a floor: wall centre-line ends ('end'; `buried` when hidden inside a joint) and the visible
+   * corners of the drawn walls ('corner'): wall rectangle corners, pairwise intersections of wall faces (the real
+   * room corners at T and L joints) and the jambs of cut openings — keeping only points where the outline turns.
+   * Cached per (walls, openings, floor).
+   */
+  let snapCache = null;
+  function floorSnapPoints(doc, floorId, excludeWall) {
+    const c = snapCache;
+    const ex = excludeWall || null;
+    if (c && c.walls === doc.walls && c.openings === doc.openings && c.floorId === floorId && c.ex === ex) return c.pts;
+    const walls = doc.walls.filter((w) => w.floor === floorId && w.id !== ex && U.dist(w.a, w.b) > 1);
+    const solid = makeSolidTest(walls, doc.openings);
+    const raw = [];
+    walls.forEach((w) => {
+      G.wallPolygon(w).forEach((p) => raw.push(p));
+      doc.openings.forEach((op) => {
+        if (op.wall !== w.id || !cutsWall(op)) return;
+        const L = G.wallDir(w).L;
+        const q = pieceQuad(w, U.clamp(op.t - op.width / 2, 0, L), U.clamp(op.t + op.width / 2, 0, L));
+        q.forEach((p) => raw.push({ x: p.x, y: p.y, jamb: true })); // jambs rank after room corners
+      });
+    });
+    const faces = walls.map((w) => G.wallFaces(w));
+    for (let i = 0; i < walls.length; i++)
+      for (let j = i + 1; j < walls.length; j++)
+        faces[i].forEach((fa) =>
+          faces[j].forEach((fb) => {
+            const hit = U.segIntersect(fa.a, fa.b, fb.a, fb.b);
+            if (hit) raw.push({ x: hit.x, y: hit.y });
+          })
+        );
+    const pts = [];
+    const seen = new Set();
+    raw.forEach((p) => {
+      const key = Math.round(p.x) + ',' + Math.round(p.y);
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (classifyPoint(solid, p) === 'corner') pts.push({ x: p.x, y: p.y, kind: 'corner', weight: p.jamb ? JAMB_SNAP_WEIGHT : 1 });
+    });
+    walls.forEach((w) =>
+      [w.a, w.b].forEach((p) => pts.push({ x: p.x, y: p.y, kind: 'end', buried: classifyPoint(solid, p) === 'inside' }))
+    );
+    snapCache = { walls: doc.walls, openings: doc.openings, floorId, ex, pts };
     return pts;
   }
-  function nearestSnapPoint(walls, p, anchor, axis, tol) {
+  /** Nearest snap point within tol (ends win ties); `visibleOnly` skips wall ends buried inside a joint. */
+  function nearestSnapPoint(pts, p, anchor, axis, tol, visibleOnly) {
     let best = null, bestD = tol;
-    walls.forEach((w) =>
-      wallSnapCandidates(w).forEach((q) => {
-        const d = Math.hypot(q.x - p.x, q.y - p.y);
-        if (d < bestD || (d === bestD && best && best.kind === 'corner' && q.kind === 'end')) {
-          bestD = d;
-          best = Object.assign(projectToAxis(q, anchor, axis), { kind: q.kind });
-        }
-      })
-    );
+    pts.forEach((q) => {
+      if (visibleOnly && q.buried) return;
+      const d = Math.hypot(q.x - p.x, q.y - p.y) * (q.weight || 1);
+      if (d < bestD || (d === bestD && best && best.kind === 'corner' && q.kind === 'end')) {
+        bestD = d;
+        best = Object.assign(projectToAxis(q, anchor, axis), { kind: q.kind });
+      }
+    });
     return best;
   }
   function axisHit(seg, anchor, axis) {
@@ -518,8 +703,10 @@
   }
   /**
    * Snap a point for wall drawing, wall endpoint editing and measuring.
-   * opts: { anchor, ortho: 'force'|'near'|'off', tol (mm), grid (mm; 0 = none), excludeWall }
-   * Priority: wall endpoints/corners → wall faces & centre lines → grid. Result: {x, y, kind, axis}.
+   * opts: { anchor, ortho: 'force'|'near'|'off', tol (mm), grid (mm; 0 = none), excludeWall, visibleOnly, bounds }
+   * Priority: wall endpoints / visible corners → wall faces & centre lines → grid. `visibleOnly` (measuring)
+   * ignores centre-line ends buried in a joint; `bounds` {minX,minY,maxX,maxY} clamps the result.
+   * Result: {x, y, kind, axis}.
    */
   function snapWallPoint(doc, floorId, raw, opts) {
     const o = opts || {};
@@ -528,9 +715,20 @@
     const p = axis ? projectToAxis(raw, anchor, axis) : raw;
     const walls = doc.walls.filter((w) => w.floor === floorId && w.id !== o.excludeWall);
     const tol = o.tol || 0;
-    const hit = nearestSnapPoint(walls, p, anchor, axis, tol) || nearestFacePoint(walls, p, anchor, axis, tol);
+    const pts = tol > 0 ? floorSnapPoints(doc, floorId, o.excludeWall) : [];
+    const hit = nearestSnapPoint(pts, p, anchor, axis, tol, !!o.visibleOnly) || nearestFacePoint(walls, p, anchor, axis, tol);
     const res = hit || gridPoint(p, anchor, axis, o.grid);
-    return { x: Math.round(res.x), y: Math.round(res.y), kind: res.kind, axis };
+    let x = Math.round(res.x), y = Math.round(res.y);
+    if (o.bounds) {
+      x = U.clamp(x, o.bounds.minX, o.bounds.maxX);
+      y = U.clamp(y, o.bounds.minY, o.bounds.maxY);
+    }
+    return { x, y, kind: res.kind, axis };
+  }
+  /** Area the wall tool may draw in: the lot ± WALL_TOOL_REACH_MM. */
+  function wallToolBounds(doc) {
+    const lot = (doc.site && doc.site.lot) || { w: 9000, h: 20000 };
+    return { minX: -WALL_TOOL_REACH_MM, minY: -WALL_TOOL_REACH_MM, maxX: lot.w + WALL_TOOL_REACH_MM, maxY: lot.h + WALL_TOOL_REACH_MM };
   }
 
   // ================================================================== pure helpers: dimensions, stairs, labels
@@ -580,18 +778,31 @@
   }
   const rectOfStair = (s) => ({ x0: s.x, y0: s.y, x1: s.x + s.length, y1: s.y + s.width });
   const rectsOverlap = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
-  /** Stairs to draw on floor index `idx`: rising from it ('up'), else arriving from the floor below ('down'). */
+  /**
+   * Stairs of floor index `idx`: the ones rising from it ('up', label "S" at the start) and the ones arriving
+   * from the floor below ('down', label "D" at the arrival). An arriving stair that shares its well with a
+   * rising one (stacked U-stairs, like the PDF's 1º pav) is not drawn again: `labelOnly` keeps just its "D".
+   */
   function stairsForFloor(doc, idx) {
     const floor = doc.floors[idx];
     if (!floor) return [];
     const rising = doc.stairs.filter((s) => s.floor === floor.id);
     const below = idx > 0 ? doc.floors[idx - 1] : null;
-    const arriving = below
-      ? doc.stairs.filter((s) => s.floor === below.id && !rising.some((r) => rectsOverlap(rectOfStair(r), rectOfStair(s))))
-      : [];
-    return rising
-      .map((st) => ({ st, mode: 'up', h: floor.height }))
-      .concat(arriving.map((st) => ({ st, mode: 'down', h: below.height })));
+    const arriving = below ? doc.stairs.filter((s) => s.floor === below.id) : [];
+    return rising.map((st) => ({ st, mode: 'up', h: floor.height, labelOnly: false })).concat(
+      arriving.map((st) => ({
+        st,
+        mode: 'down',
+        h: below.height,
+        labelOnly: rising.some((r) => rectsOverlap(rectOfStair(r), rectOfStair(st))),
+      }))
+    );
+  }
+  /** Screen box of the "S" / "D" letter of a stair entry (right-aligned just left of the stair). */
+  function stairLetterAt(v, entry) {
+    const st = entry.st;
+    const p = w2s(v, { x: st.x, y: st.y + st.width * (entry.mode === 'up' ? 0.75 : 0.25) });
+    return { x: p.x - 6, y: p.y };
   }
   function roomLabelLines(r, showName, showArea) {
     const lines = [];
@@ -671,7 +882,6 @@
   const tagSideCache = new WeakMap();
   const patternCache = new WeakMap(); // ctx → Map(materialId → CanvasPattern)
   let wallGeoCache = null;
-  let dimCache = null;
 
   function safeRooms(doc, floorId) {
     try {
@@ -701,16 +911,19 @@
     stairGeoCache.set(st, { h, g });
     return g;
   }
+  /**
+   * Dimension breakpoints (core caches them per doc identity). While a wall gesture reshapes the plan every frame,
+   * the chains of the gesture's start document are kept (they are recomputed once, when the drag ends).
+   */
   function dimensionData(doc, floorId) {
-    if (dimCache && dimCache.walls === doc.walls && dimCache.floorId === floorId) return dimCache.data;
-    let data = null;
+    const d = S.drag;
+    const src = d && d.phase === 'active' && d.startDoc && (d.type === 'wallMove' || d.type === 'wallEnd') ? d.startDoc : doc;
     try {
-      data = G.dimensionData(doc, floorId);
+      return G.dimensionData(src, floorId);
     } catch (e) {
       warnOnce('dimensionData', e);
+      return null;
     }
-    dimCache = { walls: doc.walls, floorId, data };
-    return data;
   }
   function tagSide(doc, floorId, w, op) {
     const c = tagSideCache.get(op);
@@ -814,6 +1027,7 @@
       isGround: idx === 0, show,
       exporting: !!o.exporting, interactive: !!o.interactive, background: o.background !== false,
       paper: o.exporting ? COL.paperExport : COL.paper, footer: o.footer || 0,
+      placed: [], // screen boxes of drawn annotations ({x0,y0,x1,y1}), so later labels can avoid them
     };
   }
   function toWorldSpace(rc) {
@@ -941,7 +1155,7 @@
     screen('room labels', drawRoomLabels);
     if (rc.show.labels) screen('tags', drawOpeningTags);
     if (rc.interactive) layer('overlays', rc, drawOverlays);
-    screen('corner', drawCornerWidgets);
+    if (!rc.exporting) screen('corner', drawCornerWidgets); // the export has them in its title block
     ctx.restore();
   }
 
@@ -1047,7 +1261,9 @@
     ctx.globalAlpha = 1;
   }
   function drawStairs(rc) {
-    stairsForFloor(rc.doc, rc.floorIdx).forEach((entry) => drawStair(rc, entry));
+    stairsForFloor(rc.doc, rc.floorIdx).forEach((entry) => {
+      if (!entry.labelOnly) drawStair(rc, entry);
+    });
   }
   function drawStair(rc, entry) {
     const { ctx, px } = rc;
@@ -1405,38 +1621,58 @@
     haloText(ctx, String(site.street).toUpperCase(), p.x, p.y, '#5E574D', COL.street);
     if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
   }
+  /** Step numbers (flights + the landing's "8", as printed on the approved plan) and the "S" / "D" letters. */
   function drawStairLabels(rc) {
     const { ctx, v } = rc;
-    stairsForFloor(rc.doc, rc.floorIdx).forEach(({ st, mode, h }) => {
+    stairsForFloor(rc.doc, rc.floorIdx).forEach((entry) => {
+      const { st, h } = entry;
       const g = stairGeo(st, h);
-      if (st.tread * v.scale >= 11) {
+      const fp = g.footprint;
+      if (!entry.labelOnly) {
+        const a = w2s(v, { x: fp.x0, y: fp.y0 }), b = w2s(v, { x: fp.x1, y: fp.y1 });
+        rc.placed.push({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, kind: 'stair' });
+      }
+      if (!entry.labelOnly && st.tread * v.scale >= 11) {
         ctx.font = '500 8px ' + FONT_MONO;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = COL.muted;
-        g.treads.forEach((t) => {
+        const cells = g.landingLabel ? g.treads.concat([Object.assign({ flight: 0 }, g.landingLabel)]) : g.treads;
+        cells.forEach((t) => {
           // near the outer stringer so the number never sits on the walk line (row centre)
           const y = t.flight === 0 ? t.y1 - (t.y1 - t.y0) * 0.24 : t.y0 + (t.y1 - t.y0) * 0.24;
           const c = w2s(v, { x: (t.x0 + t.x1) / 2, y });
           ctx.fillText(String(t.n), c.x, c.y);
         });
       }
-      const pos = w2s(v, { x: st.x, y: st.y + st.width * (mode === 'up' ? 0.75 : 0.25) });
+      const pos = stairLetterAt(v, entry);
       ctx.font = '700 12px ' + FONT_UI;
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      haloText(ctx, mode === 'up' ? 'S' : 'D', pos.x - 6, pos.y, COL.ink, rc.paper);
+      haloText(ctx, entry.mode === 'up' ? 'S' : 'D', pos.x, pos.y, COL.ink, rc.paper);
+      rc.placed.push({ x0: pos.x - 11, y0: pos.y - 8, x1: pos.x + 1, y1: pos.y + 8, kind: 'letter', id: entry.mode });
     });
   }
+  /**
+   * Automatic dimension chains, one per facade (core's per-side breakpoint lists). Every chain sits outside the
+   * whole floor — walls, railings / muros of balconies & terraces and closed rooms — so it never crosses a deck.
+   */
   function drawDimensions(rc) {
     const dd = dimensionData(rc.doc, rc.floorId);
     if (!dd) return;
-    const b = dd.bbox;
+    const b = dimensionEdges(rc.doc, rc.floorId, dd);
     rc.ctx.font = '500 10px ' + FONT_MONO;
-    drawChain(rc, dd.xs, 'top', b.minY);
-    drawChain(rc, dd.xsExt, 'bottom', b.maxY);
-    drawChain(rc, dd.ys, 'left', b.minX);
-    drawChain(rc, dd.ysExt, 'right', b.maxX);
+    drawChain(rc, dd.top || dd.xs, 'top', b.minY);
+    drawChain(rc, dd.bottom || dd.xsExt, 'bottom', b.maxY);
+    drawChain(rc, dd.left || dd.ys, 'left', b.minX);
+    drawChain(rc, dd.right || dd.ysExt, 'right', b.maxX);
+  }
+  function dimensionEdges(doc, floorId, dd) {
+    const b = Object.assign({}, dd.bbox);
+    const fb = floorBox(doc, floorId, true);
+    growBox(b, fb.minX, fb.minY);
+    growBox(b, fb.maxX, fb.maxY);
+    return b;
   }
   function drawChain(rc, values, side, edge) {
     if (!values || values.length < 2) return;
@@ -1499,9 +1735,7 @@
     const A = w2s(v, a), B = w2s(v, b);
     const len = Math.hypot(B.x - A.x, B.y - A.y);
     if (len < 1) return;
-    const u = unit(A, B);
-    let n = { x: -u.y, y: u.x };
-    if (n.y > 0 || (n.y === 0 && n.x > 0)) n = { x: -n.x, y: -n.y };
+    const n = measureLabelNormal(A, B);
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     if (dashed) ctx.setLineDash([6, 4]);
@@ -1515,7 +1749,8 @@
       ctx.arc(P.x, P.y, 2.2, 0, Math.PI * 2);
       ctx.fill();
     });
-    if (label && len > 24) drawPill(ctx, label, (A.x + B.x) / 2 + n.x * 13, (A.y + B.y) / 2 + n.y * 13, { fg: color, border: color });
+    const k = MEASURE_LABEL_OFFSET_PX;
+    if (label && len > 24) drawPill(ctx, label, (A.x + B.x) / 2 + n.x * k, (A.y + B.y) / 2 + n.y * k, { fg: color, border: color });
   }
   function drawMeasures(rc) {
     const sel = rc.interactive ? rc.ui.selection : null;
@@ -1525,9 +1760,10 @@
       const isSel = !!sel && sel.kind === 'measure' && sel.id === m.id;
       const isHov = !!hov && hov.kind === 'measure' && hov.id === m.id;
       const color = isSel || isHov ? COL.coral : COL.teal;
-      drawMeasureLine(rc, m.a, m.b, color, U.fmtM(U.dist(m.a, m.b)) + ' m', false);
+      drawMeasureLine(rc, m.a, m.b, color, measureText(m.a, m.b), false);
     });
   }
+  /** Room name + area, fitted to the room's width, placed on clear floor (not on furniture, stairs, door swings). */
   function drawRoomLabels(rc) {
     const showName = rc.show.labels !== false, showArea = rc.show.areas !== false;
     if (!showName && !showArea) return;
@@ -1535,28 +1771,198 @@
     const sel = rc.interactive ? rc.ui.selection : null;
     const nameSize = U.clamp(8 + v.scale * 40, 10, 14);
     const smallSize = Math.max(9, nameSize - 2.5);
+    const fontOf = (kind) =>
+      kind === 'name' ? '600 ' + nameSize + 'px ' + FONT_UI : (kind === 'area' ? '500 ' : '400 ') + smallSize + 'px ' + FONT_MONO;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    const env = labelEnv(rc);
     safeRooms(rc.doc, rc.floorId).forEach((r) => {
-      const x = w2sX(v, r.labelX), y = w2sY(v, r.labelY);
-      if (x < -120 || y < -60 || x > v.width + 120 || y > v.height + 60) return;
-      const lines = roomLabelLines(r, showName, showArea);
+      const maxW = Math.max(24, (r.bbox.maxX - r.bbox.minX) * v.scale - ROOM_NAME_PAD_PX);
+      const lines = [];
+      roomLabelLines(r, showName, showArea).forEach((l) => {
+        ctx.font = fontOf(l.kind);
+        const measure = (t) => ctx.measureText(t).width;
+        if (l.kind !== 'name') {
+          // numbers are never cut: drop the "A=" prefix when the room is narrow, and let it overhang otherwise
+          const text = measure(l.text) > maxW && /^A=/.test(l.text) ? l.text.slice(2) : l.text;
+          lines.push({ text, kind: l.kind, w: measure(text) });
+          return;
+        }
+        fitLabelText(measure, l.text, maxW, 2).forEach((text) => lines.push({ text, kind: l.kind, w: measure(text) }));
+      });
+      if (!lines.length) return;
       const heights = lines.map((l) => (l.kind === 'name' ? nameSize + 4 : smallSize + 3));
-      let cy = y - heights.reduce((a, b) => a + b, 0) / 2;
+      const boxW = Math.max(...lines.map((l) => l.w)) + 2 * LABEL_PAD_PX;
+      const boxH = heights.reduce((a, b) => a + b, 0) + 2 * LABEL_PAD_PX;
+      const spot = roomLabelSpot(rc, env, r, boxW, boxH);
+      const x = w2sX(v, spot.x), y = w2sY(v, spot.y);
+      if (x < -160 || y < -80 || x > v.width + 160 || y > v.height + 80) return;
+      let cy = y - (boxH - 2 * LABEL_PAD_PX) / 2;
       const isSel = !!sel && sel.kind === 'room' && sel.id === r.id;
       lines.forEach((l, i) => {
         cy += heights[i] / 2;
-        if (l.kind === 'name') {
-          ctx.font = '600 ' + nameSize + 'px ' + FONT_UI;
-          haloText(ctx, l.text, x, cy, isSel ? COL.coral : r.open ? COL.muted : COL.ink, rc.paper);
-        } else {
-          ctx.font = (l.kind === 'area' ? '500 ' : '400 ') + smallSize + 'px ' + FONT_MONO;
-          haloText(ctx, l.text, x, cy, l.kind === 'area' ? COL.dimText : COL.muted, rc.paper);
-        }
+        ctx.font = fontOf(l.kind);
+        const fill = l.kind === 'name' ? (isSel ? COL.coral : r.open ? COL.muted : COL.ink) : l.kind === 'area' ? COL.dimText : COL.muted;
+        haloText(ctx, l.text, x, cy, fill, rc.paper);
         cy += heights[i] / 2;
       });
+      rc.placed.push({ x0: x - boxW / 2, y0: y - boxH / 2, x1: x + boxW / 2, y1: y + boxH / 2, kind: 'room', id: r.id, lines: lines.map((l) => l.text) });
     });
   }
+  /**
+   * Break a label into at most `maxLines` lines no wider than maxW (at word boundaries), ellipsizing whatever
+   * still does not fit. `measure(text)` → width in px.
+   */
+  function fitLabelText(measure, text, maxW, maxLines) {
+    const s = String(text);
+    if (measure(s) <= maxW || maxLines <= 1) return [ellipsizeText(measure, s, maxW)];
+    const lines = [];
+    let cur = '';
+    s.split(/\s+/).filter(Boolean).forEach((word) => {
+      const next = cur ? cur + ' ' + word : word;
+      if (!cur || lines.length === maxLines - 1 || measure(next) <= maxW) cur = next; // the last line takes the rest
+      else {
+        lines.push(cur);
+        cur = word;
+      }
+    });
+    if (cur) lines.push(cur);
+    return lines.map((l) => ellipsizeText(measure, l, maxW));
+  }
+  function ellipsizeText(measure, text, maxW) {
+    if (measure(text) <= maxW) return text;
+    let t = text;
+    while (t.length > 1 && measure(t + '…') > maxW) t = t.slice(0, -1);
+    return t.replace(/\s+$/, '') + '…';
+  }
+
+  // ------------------------------------------------------------------ room label placement
+  const labelSpotCache = new Map(); // room id → { key, room, spot }
+  const DOOR_SWING_WEIGHT = 0.3; // when no spot is fully clear, covering a door arc beats covering furniture
+  /**
+   * What room labels must avoid on this frame (world AABBs): furniture (not rugs), stairs, door swings and, in
+   * the editor, the selected item's rotation knob & size pill. During a furniture drag the obstacles of the
+   * drag's start document are used, so labels do not jump around while an item moves.
+   */
+  function labelEnv(rc) {
+    const d = rc.interactive && S.drag && S.drag.phase === 'active' ? S.drag : null;
+    const furnDrag = !!d && /^furn/.test(d.type) && d.startDoc;
+    const furniture = furnDrag ? d.startDoc.furniture : rc.doc.furniture;
+    const boxes = [];
+    const add = (pts, padMM, weight) => {
+      const b = emptyBox();
+      pts.forEach((p) => growBox(b, p.x, p.y));
+      const k = padMM || 0;
+      boxes.push({ minX: b.minX - k, minY: b.minY - k, maxX: b.maxX + k, maxY: b.maxY + k, weight: weight || 1 });
+    };
+    if (rc.show.furniture) furniture.forEach((it) => it.floor === rc.floorId && !isFlat(it) && add(G.furnitureCorners(it)));
+    // stair footprint, plus the "S" / "D" letters printed just left of it
+    stairsForFloor(rc.doc, rc.floorIdx).forEach(({ st }) => add([{ x: st.x - 20 * rc.px, y: st.y }, { x: st.x + st.length, y: st.y + st.width }]));
+    doorSwingQuads(rc).forEach((q) => add(q, 0, DOOR_SWING_WEIGHT)); // only the thin arc is drawn there
+    let selKey = '';
+    const sel = rc.interactive ? rc.ui.selection : null;
+    if (sel && sel.kind === 'furniture' && !d && rc.show.furniture) {
+      const it = OPS.byId(rc.doc, 'furniture', sel.id);
+      if (it && it.floor === rc.floorId) {
+        const h = furnitureHandles(it, rc.px);
+        add([h.rotate], 12 * rc.px);
+        add(G.furnitureCorners(it), 8 * rc.px);
+        const c = G.furnitureCorners(it);
+        const maxY = Math.max(...c.map((p) => p.y)), cx = c.reduce((a, p) => a + p.x, 0) / 4;
+        add([{ x: cx - 50 * rc.px, y: maxY + 6 * rc.px }, { x: cx + 50 * rc.px, y: maxY + 26 * rc.px }]); // size pill
+        selKey = [it.id, it.x, it.y, it.rot, it.w, it.d].join(':');
+      }
+    }
+    return { boxes, furniture, openings: rc.doc.openings, selKey, bucket: Math.round(Math.log(rc.v.scale) / 0.08) };
+  }
+  /** Leaf sweep of every hinged door on the floor (world quads), where a label would sit under the door. */
+  function doorSwingQuads(rc) {
+    const out = [];
+    const walls = wallMapOf(rc.doc, rc.floorId);
+    rc.doc.openings.forEach((op) => {
+      const w = walls.get(op.wall);
+      if (!w || op.type !== 'door' || !/^(swing|gate|double)$/.test(op.style || 'swing')) return;
+      const f = G.openingFrame(w, op);
+      const side = op.side || 1, h = w.thick / 2;
+      const reach = op.style === 'double' ? op.width / 2 : op.width;
+      out.push([offsetPt(f.start, f.n, side * h), offsetPt(f.end, f.n, side * h), offsetPt(f.end, f.n, side * (h + reach)), offsetPt(f.start, f.n, side * (h + reach))]);
+    });
+    return out;
+  }
+  /** Label anchor for a room (world): cached per room shape, obstacles, zoom bucket and label size. */
+  function roomLabelSpot(rc, env, r, boxWpx, boxHpx) {
+    const seed = { x: r.labelX, y: r.labelY };
+    if (r.open || !r.outer) return seed;
+    const key = [env.bucket, Math.round(boxWpx), Math.round(boxHpx), env.selKey, rc.show.furniture ? 1 : 0].join('|');
+    const c = labelSpotCache.get(r.id);
+    if (c && c.room === r && c.key === key && c.furniture === env.furniture && c.openings === env.openings) return c.spot;
+    const W = boxWpx * rc.px, H = boxHpx * rc.px;
+    let spot = null;
+    // while a wall gesture reshapes rooms every frame, keep the previous spot as long as it still fits
+    if (c && c.key === key && store() && store().inGesture() && labelBoxFree(r, c.spot, W, H, env.boxes)) spot = c.spot;
+    if (!spot) spot = findLabelSpot(r, seed, W, H, env.boxes) || seed;
+    labelSpotCache.set(r.id, { key, room: r, furniture: env.furniture, openings: env.openings, spot });
+    return spot;
+  }
+  /** Nearest point to the seed where a W×H (mm) label box lies inside the room and clear of every obstacle. */
+  function findLabelSpot(r, seed, W, H, boxes) {
+    const bb = r.bbox;
+    const near = boxes.filter((b) => b.maxX > bb.minX && b.minX < bb.maxX && b.maxY > bb.minY && b.minY < bb.maxY);
+    let step = Math.max(40, Math.min(W, H) / 2);
+    step = Math.max(step, Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY) / LABEL_MAX_CANDIDATES);
+    const cands = [];
+    const i0 = Math.ceil((bb.minX + W / 2 - seed.x) / step), i1 = Math.floor((bb.maxX - W / 2 - seed.x) / step);
+    const j0 = Math.ceil((bb.minY + H / 2 - seed.y) / step), j1 = Math.floor((bb.maxY - H / 2 - seed.y) / step);
+    for (let j = j0; j <= j1; j++)
+      for (let i = i0; i <= i1; i++) {
+        const dx = i * step, dy = j * step;
+        cands.push({ x: seed.x + dx, y: seed.y + dy, d: dx * dx + dy * dy * 1.3 }); // slight preference to stay level
+      }
+    cands.sort((a, b) => a.d - b.d);
+    for (const c of cands) if (labelBoxFree(r, c, W, H, near)) return { x: c.x, y: c.y };
+    // nothing fully clear (e.g. a garage filled by the car): the in-room spot least covered by obstacles
+    let best = null;
+    for (const c of cands) {
+      if (!labelBoxFree(r, c, W, H, [])) continue;
+      const cover = near.reduce((a, b) => a + overlapArea(b, c, W, H) * (b.weight || 1), 0) + c.d * 1e-3;
+      if (!best || cover < best.cover) best = { x: c.x, y: c.y, cover };
+    }
+    return best ? { x: best.x, y: best.y } : null;
+  }
+  function overlapArea(b, c, W, H) {
+    const w = Math.min(b.maxX, c.x + W / 2) - Math.max(b.minX, c.x - W / 2);
+    const h = Math.min(b.maxY, c.y + H / 2) - Math.max(b.minY, c.y - H / 2);
+    return w > 0 && h > 0 ? w * h : 0;
+  }
+  function labelBoxFree(r, c, W, H, boxes) {
+    const x0 = c.x - W / 2, x1 = c.x + W / 2, y0 = c.y - H / 2, y1 = c.y + H / 2;
+    for (const b of boxes) if (b.maxX > x0 && b.minX < x1 && b.maxY > y0 && b.minY < y1) return false;
+    const inRoom = (p) => U.pointInPolygon(p, r.outer) && !(r.holes || []).some((h) => U.pointInPolygon(p, h));
+    for (let k = 0; k < 9; k++) if (!inRoom({ x: x0 + ((k % 3) * W) / 2, y: y0 + (Math.floor(k / 3) * H) / 2 })) return false;
+    // a notch of the (rectilinear) room poking into the box
+    const loops = [r.outer].concat(r.holes || []);
+    return !loops.some((loop) => loop.some((p) => p.x > x0 && p.x < x1 && p.y > y0 && p.y < y1));
+  }
+  /**
+   * Candidate centres (screen) for an opening's tag, best first: the preferred side of the wall, the other side,
+   * then slid along the wall by one and two tag diameters on both sides.
+   */
+  function tagCandidates(v, px, w, f, side, r) {
+    const out = [];
+    const d = { x: f.d.x, y: f.d.y };
+    [0, 2 * r, -2 * r, 4 * r, -4 * r].forEach((slide) =>
+      [side, -side].forEach((sd) => {
+        const base = w2s(v, offsetPt(f.c, f.n, sd * (w.thick / 2 + TAG_GAP_PX * px)));
+        out.push({ x: base.x + d.x * slide, y: base.y + d.y * slide });
+      })
+    );
+    return out;
+  }
+  const circleHitsBox = (c, r, b) => {
+    const nx = U.clamp(c.x, b.x0, b.x1), ny = U.clamp(c.y, b.y0, b.y1);
+    return Math.hypot(c.x - nx, c.y - ny) < r;
+  };
+  /** Door & window tags: never on the stair drawing, its numbers / letters, room labels or another tag. */
   function drawOpeningTags(rc) {
     if (rc.v.scale < TAG_MIN_SCALE) return;
     const { ctx, v, px } = rc;
@@ -1564,14 +1970,32 @@
     ctx.font = '600 8.5px ' + FONT_MONO;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    const wallBoxes = [];
+    geo.wallMap.forEach((w) => {
+      const { d } = G.wallDir(w);
+      if (Math.abs(d.x) > 0.01 && Math.abs(d.y) > 0.01) return; // a slanted wall's box would block everything
+      const b = emptyBox();
+      G.wallPolygon(w).forEach((q) => {
+        const s = w2s(v, q);
+        growBox(b, s.x, s.y);
+      });
+      wallBoxes.push({ x0: b.minX, y0: b.minY, x1: b.maxX, y1: b.maxY });
+    });
     rc.doc.openings.forEach((op) => {
       const w = geo.wallMap.get(op.wall);
       if (!w || !op.code) return;
       const f = G.openingFrame(w, op);
       const side = tagSide(rc.doc, rc.floorId, w, op);
-      const p = w2s(v, offsetPt(f.c, f.n, side * (w.thick / 2 + TAG_GAP_PX * px)));
-      if (p.x < -20 || p.y < -20 || p.x > v.width + 20 || p.y > v.height + 20) return;
       const r = Math.max(9.5, ctx.measureText(op.code).width / 2 + 4);
+      const cands = tagCandidates(v, px, w, f, side, r);
+      const clear = (c) => !rc.placed.some((b) => circleHitsBox(c, r + 1.5, b)) && !wallBoxes.some((b) => circleHitsBox(c, r, b));
+      let p = cands.find(clear);
+      if (!p) {
+        if (v.scale < TAG_CROWDED_SCALE) return;
+        p = cands[0];
+      }
+      if (p.x < -20 || p.y < -20 || p.x > v.width + 20 || p.y > v.height + 20) return;
+      rc.placed.push({ x0: p.x - r, y0: p.y - r, x1: p.x + r, y1: p.y + r, kind: 'tag', id: op.id });
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fillStyle = rc.paper;
@@ -2043,7 +2467,10 @@
     const st = store();
     if (!st) return null;
     const box = floorBox(st.doc, st.ui.floor, true);
-    const pad =Math.min(84, Math.max(24, Math.min(S.view.width, S.view.height) * 0.12));
+    // the two dimension chains + labels sit ~90 px outside the building: reserve that room when they are shown
+    const minDim = Math.min(S.view.width, S.view.height);
+    const dimsOn = !st.ui.show || st.ui.show.dims !== false;
+    const pad = dimsOn ? Math.min(96, Math.max(40, minDim * 0.2)) : Math.min(48, Math.max(16, minDim * 0.08));
     return fitRect(box, S.view.width, S.view.height, pad);
   }
   function fit(animated) {
@@ -2225,8 +2652,9 @@
   // ================================================================== tools: measure / wall
   function snapOptsFor(tool, anchor, ev) {
     const tol = SNAP_POINT_PX / S.view.scale;
-    if (tool === 'wall') return { anchor, ortho: anchor && !ev.shiftKey ? 'force' : 'off', tol, grid: WALL_GRID_MM };
-    return { anchor, ortho: anchor && ev.shiftKey ? 'force' : 'off', tol, grid: 0 };
+    if (tool === 'wall')
+      return { anchor, ortho: anchor && !ev.shiftKey ? 'force' : 'off', tol, grid: WALL_GRID_MM, bounds: wallToolBounds(store().doc) };
+    return { anchor, ortho: anchor && ev.shiftKey ? 'force' : 'off', tol, grid: 0, visibleOnly: true };
   }
   function updateToolPreview(ev, p) {
     const st = store();
@@ -2266,6 +2694,7 @@
     const m = { id: U.uid('m'), floor: st.ui.floor, a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } };
     st.commit(OPS.add(st.doc, 'measures', m), 'Medição');
     S.measure = null;
+    setSelection({ kind: 'measure', id: m.id }); // shown in the inspector, ready to be deleted
     markDirty();
   }
   function addWallSegment(a, b) {
@@ -2441,7 +2870,7 @@
         moveWallDrag(d, p);
       },
       end(d) {
-        store().endGesture(d.label);
+        finishWallGesture(d);
       },
       cancel() {
         store().cancelGesture();
@@ -2455,7 +2884,7 @@
         moveWallEnd(d, ev, p);
       },
       end(d) {
-        store().endGesture(d.label);
+        finishWallGesture(d);
       },
       cancel() {
         store().cancelGesture();
@@ -2529,11 +2958,57 @@
     st.beginGesture(label);
     return true;
   }
+  /**
+   * End of a wall move / endpoint drag. Rooms split by the new wall position get their own seed ("Sala 2") in the
+   * same undo step. The reseed needs the exact (10 mm) room grid, which core only uses outside a gesture, so the
+   * gesture is closed by restoring its start document and committing the final one in a single step.
+   */
+  function finishWallGesture(d) {
+    const st = store();
+    const moved = st.doc;
+    if (moved === d.startDoc || !st.inGesture()) {
+      st.endGesture(d.label);
+      return;
+    }
+    st.cancelGesture();
+    let next = moved;
+    try {
+      next = OPS.reseedSplitRooms(d.startDoc, moved, d.startWall.floor);
+    } catch (e) {
+      warnOnce('reseedSplitRooms', e);
+    }
+    st.commit(next, d.label);
+  }
+  function warnJointClash(d, op) {
+    if (d.clashWarned) return;
+    d.clashWarned = true;
+    DD.toast('A junta da parede não pode ficar sobre a abertura ' + (op.code || '') + ' — movimento limitado.', 'warn');
+  }
+  /** Opening that one end of the moved wall would butt into at offset `off` (mm along its normal), or null. */
+  function wallMoveClash(d, off) {
+    const w = d.startWall;
+    const { n } = G.wallDir(w);
+    for (const e of [w.a, w.b]) {
+      const hit = jointOpeningClash(d.startDoc, w.floor, { x: e.x + n.x * off, y: e.y + n.y * off }, w.thick, w.id);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  /** Largest offset between 0 and `off` whose joints stay clear of the openings of the walls they butt into. */
+  function clampWallOffset(d, off) {
+    const hit = off ? wallMoveClash(d, off) : null;
+    if (!hit) return off;
+    warnJointClash(d, hit);
+    const step = off > 0 ? -WALL_MOVE_STEP_MM : WALL_MOVE_STEP_MM;
+    let o = off;
+    while (o !== 0 && wallMoveClash(d, o)) o += step;
+    return o;
+  }
   function moveWallDrag(d, p) {
     const w = d.startWall;
     const { n } = G.wallDir(w);
     const raw = (p.x - d.startWorld.x) * n.x + (p.y - d.startWorld.y) * n.y;
-    const off = Math.round(raw / WALL_MOVE_STEP_MM) * WALL_MOVE_STEP_MM;
+    const off = clampWallOffset(d, Math.round(raw / WALL_MOVE_STEP_MM) * WALL_MOVE_STEP_MM);
     if (off !== d.lastOff) {
       d.lastOff = off;
       store().preview(off ? OPS.moveWall(d.startDoc, w.id, Math.round(n.x * off), Math.round(n.y * off)) : d.startDoc);
@@ -2562,9 +3037,15 @@
       tol: SNAP_POINT_PX / S.view.scale,
       grid: WALL_MOVE_STEP_MM,
       excludeWall: w.id,
+      bounds: wallToolBounds(d.startDoc),
     });
     if (U.dist(anchor, sp) < MIN_WALL_MM) return;
     const pt = { x: sp.x, y: sp.y };
+    const clash = jointOpeningClash(d.startDoc, w.floor, pt, w.thick, w.id);
+    if (clash) {
+      warnJointClash(d, clash); // keep the last valid preview
+      return;
+    }
     const key = pt.x + ',' + pt.y;
     if (key !== d.lastKey) {
       d.lastKey = key;
@@ -2933,8 +3414,9 @@
       return null;
     }
     const usePointer = clientX != null && clientY != null && S.canvas && insideCanvas(clientX, clientY);
-    const p = usePointer ? screenToWorld(clientX, clientY) : { x: S.view.cx, y: S.view.cy };
     const floor = st.ui.floor;
+    // a drop goes where the user let go; a click in the library looks for free floor near the view centre
+    const p = usePointer ? screenToWorld(clientX, clientY) : freeSpotNear(st.doc, floor, def, { x: S.view.cx, y: S.view.cy });
     let doc = st.doc, item = null;
     try {
       const r = OPS.addFurniture(doc, type, floor, p.x, p.y, 0);
@@ -2952,6 +3434,56 @@
     setSelection({ kind: 'furniture', id: item.id });
     return item.id;
   }
+  /**
+   * Nearest spot (spiral search from `p`, 150 mm steps, up to 8 m) where an item of the catalog size fits entirely
+   * inside one room without touching walls, stairs or other non-flat furniture. Falls back to `p`.
+   */
+  function freeSpotNear(doc, floor, def, p) {
+    const hw = def.w / 2 + 20, hd = def.d / 2 + 20;
+    const boxes = [];
+    doc.walls.forEach((w) => {
+      if (w.floor === floor) boxes.push(aabbOf(G.wallPolygon(w)));
+    });
+    doc.stairs.forEach((s) => {
+      if (s.floor === floor) boxes.push({ minX: s.x, minY: s.y, maxX: s.x + s.length, maxY: s.y + s.width });
+    });
+    G.stairHoles(doc, floor).forEach((h) => boxes.push({ minX: h.x0, minY: h.y0, maxX: h.x1, maxY: h.y1 }));
+    if (!def.flat)
+      doc.furniture.forEach((f) => {
+        const fd = catalogDef(f.type);
+        if (f.floor === floor && !(fd && fd.flat)) boxes.push(aabbOf(G.furnitureCorners(f)));
+      });
+    const fits = (x, y) => {
+      const r = { minX: x - hw, minY: y - hd, maxX: x + hw, maxY: y + hd };
+      if (boxes.some((b) => b.minX < r.maxX && b.maxX > r.minX && b.minY < r.maxY && b.maxY > r.minY)) return false;
+      const room = safeRoomAt(doc, floor, x, y);
+      if (!room) return false;
+      return [[r.minX, r.minY], [r.maxX, r.minY], [r.maxX, r.maxY], [r.minX, r.maxY]].every((c) => {
+        const at = safeRoomAt(doc, floor, c[0], c[1]);
+        return at && at.id === room.id;
+      });
+    };
+    const STEP = 150;
+    for (let ring = 0; ring * STEP <= 8000; ring++) {
+      for (let i = -ring; i <= ring; i++)
+        for (let j = -ring; j <= ring; j++) {
+          if (Math.max(Math.abs(i), Math.abs(j)) !== ring) continue;
+          const x = Math.round(p.x + i * STEP), y = Math.round(p.y + j * STEP);
+          if (fits(x, y)) return { x, y };
+        }
+    }
+    return p;
+  }
+  function aabbOf(pts) {
+    const b = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    pts.forEach((q) => {
+      b.minX = Math.min(b.minX, q.x);
+      b.minY = Math.min(b.minY, q.y);
+      b.maxX = Math.max(b.maxX, q.x);
+      b.maxY = Math.max(b.maxY, q.y);
+    });
+    return b;
+  }
   /** Dropped near a wall: turn the item's back to the nearest face, slide it flush, then let core snapping add corners. */
   function snapNewItem(doc, floor, item) {
     const threshold = Math.max(SNAP_FURNITURE_PX / S.view.scale, DROP_SNAP_MM);
@@ -2965,28 +3497,49 @@
   }
 
   // ================================================================== PNG export
-  function exportBox(doc, floorId, isGround) {
-    const b = floorBox(doc, floorId);
+  /** Area exported: the built floor (walls, terraces, stairs) plus its dimension chains — not the empty lot. */
+  function exportBox(doc, floorId) {
+    const b = floorBox(doc, floorId, true);
     const dd = dimensionData(doc, floorId);
     if (dd) {
       growBox(b, dd.bbox.minX, dd.bbox.minY);
       growBox(b, dd.bbox.maxX, dd.bbox.maxY);
     }
-    // Térreo: keep the sidewalk and the street name, not the whole road
-    if (isGround && doc.site && doc.site.lot) growBox(b, doc.site.lot.w / 2, doc.site.lot.h + SIDEWALK_MM + ROAD_MM * STREET_NAME_AT + 250);
     return b;
   }
-  /** Offscreen render of the active floor at 1 px per 10 mm × scale, with title block and wall legend. */
+  /** Rooms listed in the export's schedule: closed rooms, largest first. */
+  function scheduleRooms(doc, floorId) {
+    return safeRooms(doc, floorId)
+      .filter((r) => !r.open)
+      .slice()
+      .sort((a, b) => b.area - a.area);
+  }
+  /** Footer layout (css px): title row, then the room schedule in columns and the wall legend on the right. */
+  function exportFooterLayout(width, roomCount) {
+    const legendW = 200;
+    const cols = Math.max(1, Math.min(4, Math.floor((width - 40 - legendW - 24) / EXPORT_SCHEDULE_COL_W)));
+    const rows = Math.max(WALL_LEGEND.length, Math.ceil(roomCount / cols));
+    return { cols, rows, legendW, height: EXPORT_TITLE_H + 30 + rows * EXPORT_ROW_H + 10 };
+  }
+  /**
+   * Offscreen render of the active floor: the building and its dimension chains, with a title block (floor, area,
+   * source, date, scale bar, north), a room schedule and the wall legend. The image is sized from `scale`
+   * (css px ×) but its longest side never exceeds EXPORT_MAX_SIDE_PX.
+   */
   function exportPNG(opts) {
     const st = store();
     if (!st) throw new Error('Editor 2D não inicializado.');
     const o = opts || {};
-    const k = o.scale > 0 ? Math.min(o.scale, 6) : 2;
     const doc = st.doc;
     const idx = Math.max(0, doc.floors.findIndex((f) => f.id === st.ui.floor));
-    const box = exportBox(doc, doc.floors[idx].id, idx === 0);
+    const floorId = doc.floors[idx].id;
+    const box = exportBox(doc, floorId);
     const width = Math.ceil((box.maxX - box.minX) * EXPORT_PX_PER_MM + 2 * EXPORT_MARGIN_PX);
-    const height = Math.ceil((box.maxY - box.minY) * EXPORT_PX_PER_MM + 2 * EXPORT_MARGIN_PX + EXPORT_FOOTER_PX);
+    const planH = Math.ceil((box.maxY - box.minY) * EXPORT_PX_PER_MM + 2 * EXPORT_MARGIN_PX);
+    const layout = exportFooterLayout(width, scheduleRooms(doc, floorId).length);
+    const height = planH + layout.height;
+    const want = o.scale > 0 ? Math.min(o.scale, 6) : 2;
+    const k = Math.min(want, EXPORT_MAX_SIDE_PX / Math.max(width, height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(width * k);
     canvas.height = Math.round(height * k);
@@ -2994,7 +3547,7 @@
     if (!ctx) throw new Error('Canvas 2D indisponível.');
     const view = {
       cx: (box.minX + box.maxX) / 2,
-      cy: (box.minY + box.maxY) / 2 + EXPORT_FOOTER_PX / 2 / EXPORT_PX_PER_MM,
+      cy: (box.minY + box.maxY) / 2 + layout.height / 2 / EXPORT_PX_PER_MM,
       scale: EXPORT_PX_PER_MM,
       width,
       height,
@@ -3002,14 +3555,16 @@
     const rc = makeRC(ctx, view, k, doc, st.ui, {
       exporting: true,
       background: o.background !== false,
-      footer: EXPORT_FOOTER_PX,
+      footer: layout.height,
       show: { dims: true, grid: false },
     });
     drawScene(rc);
-    layer('title block', rc, drawTitleBlock);
+    layer('title block', rc, (r) => drawTitleBlock(r, layout));
     return canvas.toDataURL('image/png');
   }
-  function drawTitleBlock(rc) {
+  /** "Planta aprovada 01/01 (esc. 1:100)" → "Planta aprovada 01/01": the image is not printed at a scale. */
+  const stripScaleClaim = (s) => String(s || '').replace(/\s*\(\s*esc[^)]*\)/i, '').replace(/\s*esc(ala)?\.?\s*1\s*:\s*\d+/i, '').trim();
+  function drawTitleBlock(rc, layout) {
     const { ctx, doc, floor } = rc;
     const W = rc.v.width, y0 = rc.v.height - rc.footer;
     toScreenSpace(rc);
@@ -3031,28 +3586,66 @@
     ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = COL.ink;
     ctx.font = '600 18px ' + FONT_UI;
-    ctx.fillText(floor.name + ' — Área útil: ' + U.fmtArea(area), 20, y0 + 40);
+    ctx.fillText(floor.name + ' — Área útil: ' + U.fmtArea(area), 20, y0 + 36);
     ctx.font = '500 12px ' + FONT_UI;
     ctx.fillStyle = COL.dimText;
-    ctx.fillText(meta.name || 'Projeto', 20, y0 + 62);
+    ctx.fillText(meta.name || 'Projeto', 20, y0 + 55);
     ctx.font = '400 11px ' + FONT_UI;
     ctx.fillStyle = COL.muted;
+    const base = stripScaleClaim(meta.source);
     const date = new Date().toLocaleDateString('pt-BR');
-    ctx.fillText((meta.source ? meta.source + ' · ' : '') + 'Exportado em ' + date, 20, y0 + 80);
-    drawWallLegend(rc, W - 20, y0 + 30);
+    ctx.fillText((base ? 'Base: ' + base + ' · ' : '') + 'Exportado em ' + date + ' · medidas em metros', 20, y0 + 71);
+    const nb = niceScaleBar(rc.v.scale);
+    drawScaleBar(rc, W - 84 - nb.px, y0 + 52);
+    drawNorthArrow(rc, W - 42, y0 + 42);
+    const top = y0 + EXPORT_TITLE_H + 30;
+    drawRoomSchedule(rc, 20, top, layout);
+    drawWallLegend(rc, W - 20 - layout.legendW, top);
   }
-  function drawWallLegend(rc, right, top) {
+  function drawRoomSchedule(rc, x0, top, layout) {
     const ctx = rc.ctx;
-    const colW = 186, rowH = 24;
-    const x0 = Math.max(20 + 380, right - 2 * colW);
-    ctx.font = '500 11px ' + FONT_UI;
+    const rooms = scheduleRooms(rc.doc, rc.floor.id);
     ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = '600 10px ' + FONT_UI;
+    ctx.fillStyle = COL.muted;
+    const head = 'AMBIENTES';
+    ctx.fillText(head, x0, top - 16);
+    if (rooms.some((r) => r.outdoor)) {
+      ctx.font = '400 10px ' + FONT_UI;
+      ctx.fillText('·  em cinza: áreas externas, fora da área útil', x0 + ctx.measureText(head).width + 34, top - 16);
+    }
+    rooms.forEach((r, i) => {
+      const col = Math.floor(i / layout.rows), row = i % layout.rows;
+      const x = x0 + col * EXPORT_SCHEDULE_COL_W, y = top + row * EXPORT_ROW_H;
+      const areaText = U.fmtArea(r.area);
+      ctx.font = '500 10.5px ' + FONT_MONO;
+      const aw = ctx.measureText(areaText).width;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = r.outdoor ? COL.muted : COL.dimText;
+      ctx.fillText(areaText, x + EXPORT_SCHEDULE_COL_W - 18, y);
+      ctx.textAlign = 'left';
+      ctx.font = '500 11px ' + FONT_UI;
+      ctx.fillStyle = r.outdoor ? COL.muted : COL.ink;
+      const measure = (t) => ctx.measureText(t).width;
+      const name = ellipsizeText(measure, r.name, EXPORT_SCHEDULE_COL_W - 30 - aw);
+      ctx.fillText(name, x, y);
+    });
+  }
+  function drawWallLegend(rc, x0, top) {
+    const ctx = rc.ctx;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = '600 10px ' + FONT_UI;
+    ctx.fillStyle = COL.muted;
+    ctx.fillText('LEGENDA', x0, top - 16);
+    ctx.font = '500 11px ' + FONT_UI;
     WALL_LEGEND.forEach((item, i) => {
-      const x = x0 + (i % 2) * colW, y = top + Math.floor(i / 2) * rowH;
-      drawLegendSwatch(ctx, item.kind, x, y - 6, 30, 12, rc.paper);
+      const y = top + i * EXPORT_ROW_H;
+      drawLegendSwatch(ctx, item.kind, x0, y - 5, 28, 10, rc.paper);
       ctx.fillStyle = COL.dimText;
       ctx.textAlign = 'left';
-      ctx.fillText(item.label, x + 38, y);
+      ctx.fillText(item.label, x0 + 36, y);
     });
   }
   function drawLegendSwatch(ctx, kind, x, y, w, h, paper) {
@@ -3136,10 +3729,13 @@
   }
   function onDocChange(doc, prev, info) {
     const d = S.drag;
-    if (d && d.phase === 'active' && info && (info.undo || info.redo || info.replaced || info.cancel)) {
-      S.drag = null; // the store already dropped the gesture
+    if (d && info && (info.undo || info.redo || info.replaced || info.cancel)) {
+      // undo / redo / import / a cancelled gesture during a local drag: its start document is stale — drop it
+      S.drag = null;
       S.feedback = null;
       releaseCapture(d);
+      const st = store();
+      if (d.phase === 'active' && st && st.inGesture()) st.cancelGesture();
     }
     if (info && (info.undo || info.redo || info.replaced)) S.fades = [];
     markDirty();
@@ -3215,7 +3811,9 @@
       zoomAround, fitRect, floorBox, furnitureHandles, hitFurnitureHandle, resizeFromHandle, rotationFromPointer,
       handleCursor, hitTestSelect, hitWall, hitOpening, snapWallPoint, solidIntervals, pieceQuad, openingRange,
       retargetOpenings, layoutChainLabels, niceScaleBar, scaleLabel, stairsForFloor, roomLabelLines, tagSideOf,
-      sideRays, backToWallRotation, cutsWall, makeRC, drawScene,
+      sideRays, backToWallRotation, cutsWall, makeRC, drawScene, hitMeasure, floorSnapPoints, classifyPoint,
+      wallObstacles, jointOpeningClash, fitLabelText, ellipsizeText, findLabelSpot, labelBoxFree, stripScaleClaim,
+      exportFooterLayout, exportBox, dimensionEdges, wallToolBounds,
       state: () => S,
       setClock(fn) {
         clock = fn;

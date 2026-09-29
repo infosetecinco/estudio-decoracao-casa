@@ -43,6 +43,7 @@
 
   --topbar-h: 52px;
   --status-h: 30px;
+  --dock-h: 52px;
   --rail-w: 52px;
   --lib-w: 272px;
   --lib-w-open: 272px;
@@ -689,6 +690,26 @@ kbd {
 .panel-head .icon-btn {
   margin-left: auto;
 }
+.panel-head .btn-clear {
+  margin-left: auto;
+  padding: 0 8px 0 6px;
+  gap: 4px;
+  color: var(--muted);
+}
+.panel-head .btn-clear:hover {
+  color: var(--text);
+}
+.panel-head .btn-clear:not([hidden]) ~ .icon-btn {
+  margin-left: 0;
+}
+.panel-title:focus {
+  outline: none;
+}
+.panel-title:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent-line);
+  outline-offset: 3px;
+}
 .lib-tools {
   display: flex;
   flex-direction: column;
@@ -817,7 +838,7 @@ kbd {
   border-top: 1px solid var(--line-soft);
   color: var(--faint);
   font-size: 11px;
-  white-space: nowrap;
+  line-height: 1.35;
 }
 
 /* ------------------------------------------------------------------ stage & views */
@@ -993,18 +1014,30 @@ kbd {
   -webkit-backdrop-filter: blur(10px) saturate(1.1);
   backdrop-filter: blur(10px) saturate(1.1);
 }
+/* The plan canvas lives in .plan-host; a docked bar (paint palette) pushes it down instead of covering the
+   drawing's dimension chains and tags. 40-ui re-fits a fully visible floor when the bar comes and goes. */
+.plan-host {
+  position: absolute;
+  inset: 0;
+}
+#view2d.has-dock .plan-host {
+  top: var(--dock-h);
+}
 .paint-strip {
   position: absolute;
-  top: 12px;
-  left: 50%;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 4;
   display: flex;
   align-items: center;
-  gap: 10px;
-  max-width: calc(100% - 24px);
-  padding: 6px 8px 6px 12px;
-  transform: translateX(-50%);
-  animation: float-in 260ms var(--ease-out-expo);
+  gap: 12px;
+  height: var(--dock-h);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+  animation: dock-in 220ms var(--ease-out-expo);
 }
 .paint-strip-label {
   display: flex;
@@ -1019,6 +1052,7 @@ kbd {
 }
 .paint-swatches {
   display: flex;
+  min-width: 0;
   gap: 5px;
   overflow-x: auto;
   scrollbar-width: none;
@@ -1040,10 +1074,9 @@ kbd {
 .paint-swatch[aria-pressed='true'] {
   box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
 }
-@keyframes float-in {
+@keyframes dock-in {
   from {
     opacity: 0;
-    transform: translate(-50%, -6px);
   }
 }
 
@@ -1116,6 +1149,9 @@ kbd {
 .o3d-bar .chip[aria-pressed='true'] {
   background: color-mix(in srgb, var(--glass) 70%, var(--accent) 30%);
   color: var(--text);
+}
+#view3d:has(> .v3d-walk-prompt:not([hidden])) .o3d-hint {
+  display: none;
 }
 .o3d-hint {
   position: absolute;
@@ -1646,14 +1682,36 @@ kbd {
 .status-group:last-child {
   border-right: 0;
 }
+/* The hint gets whatever room is left; below ~26 characters it is hidden instead of clipped to a letter. */
 .status-grow {
-  flex: 1 1 auto;
+  container: status-main / inline-size;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
 }
 .status-hint {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+@container status-main (max-width: 320px) {
+  .status-hint {
+    display: none;
+  }
+}
+.status-tool {
+  flex: none;
+}
+/* 3D-only view: the plan's zoom, cursor and drawing toggles do nothing there, so they step aside. */
+.app[data-view='3d'] .status-2d {
+  display: none !important;
+}
+.app[data-view='3d'] .toolrail .tool-btn {
+  opacity: 0.5;
+}
+.app[data-view='3d'] .toolrail .tool-btn:hover,
+.app[data-view='3d'] .toolrail .tool-btn:focus-visible {
+  opacity: 1;
 }
 .status-tool {
   color: var(--text);
@@ -1864,10 +1922,16 @@ kbd {
     transform: translateY(8px) scale(0.985);
   }
 }
+#dlg-shortcuts {
+  width: min(720px, calc(100vw - 32px));
+}
 .shortcut-groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 18px 26px;
+  columns: 2 260px;
+  column-gap: 28px;
+}
+.shortcut-group {
+  break-inside: avoid;
+  margin-bottom: 18px;
 }
 .shortcut-group h3 {
   margin: 0 0 8px;
@@ -1925,6 +1989,26 @@ kbd {
   }
   .lib-grid {
     gap: 6px;
+  }
+}
+
+@media (max-width: 1099px) {
+  .statusbar .chip-label {
+    display: none;
+  }
+  .statusbar .chip {
+    width: 28px;
+    padding: 0;
+    justify-content: center;
+  }
+}
+
+/* Touch screens: inputs at 16 px so iOS does not zoom the page when a field gets focus (qaui#10). */
+@media (pointer: coarse) {
+  .field-input,
+  .field-input.is-text,
+  .search input {
+    font-size: 16px;
   }
 }
 
@@ -2073,6 +2157,39 @@ kbd {
   }
   .paint-strip-label {
     display: none;
+  }
+  .paint-strip {
+    padding: 0 8px;
+  }
+  .field-input,
+  .field-input.is-text,
+  .search input {
+    font-size: 16px;
+  }
+  .search input {
+    height: 38px;
+  }
+  .field-input {
+    height: 36px;
+  }
+  /* denser library: three compact cards per row */
+  .lib-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    padding: 4px 10px 12px;
+  }
+  .lib-card {
+    gap: 1px;
+    padding: 4px 4px 6px;
+  }
+  .lib-thumb {
+    margin-bottom: 3px;
+  }
+  .lib-name {
+    font-size: 11.5px;
+  }
+  .lib-size {
+    font-size: 10px;
   }
   .o3d-bar .btn-label {
     display: none;

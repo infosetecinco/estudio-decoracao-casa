@@ -161,7 +161,8 @@
         gestureStart = null;
         if (start !== doc) {
           pushUndo(start, label || gestureLabel);
-          notify(doc, { label: label || gestureLabel, gestureEnd: true });
+          // prev = pre-gesture doc, so reference diffs in subscribers see everything the gesture changed
+          notify(start, { label: label || gestureLabel, gestureEnd: true });
           DD.events.emit('doc:committed', { label: label || gestureLabel });
         }
       },
@@ -173,8 +174,13 @@
         notify(prev, { cancel: true });
       },
       inGesture: () => !!gestureStart,
+      /** Undo. During an open gesture (drag) it only aborts the gesture — the previous step is kept. */
       undo() {
-        if (gestureStart) api.cancelGesture();
+        if (gestureStart) {
+          const lbl = gestureLabel;
+          api.cancelGesture();
+          return lbl;
+        }
         const e = undoStack.pop();
         if (!e) return null;
         redoStack.push({ state: doc, label: e.label });
@@ -184,7 +190,12 @@
         DD.events.emit('doc:committed', { label: e.label, undo: true });
         return e.label;
       },
+      /** Redo. Ignored during an open gesture (the drag is aborted so the store never stays half-open). */
       redo() {
+        if (gestureStart) {
+          api.cancelGesture();
+          return null;
+        }
         const e = redoStack.pop();
         if (!e) return null;
         undoStack.push({ state: doc, label: e.label });
@@ -200,6 +211,7 @@
       redoLabel: () => (redoStack.length ? redoStack[redoStack.length - 1].label : null),
       /** Load a whole new document (import / reset). Recorded as one undo step unless opts.clearHistory. */
       replace(next, label, opts) {
+        if (gestureStart) api.cancelGesture();
         if (opts && opts.clearHistory) {
           undoStack.length = 0;
           redoStack.length = 0;
@@ -295,12 +307,59 @@
       height: f ? f.height : 2880,
       kind: 'partition',
     };
-    return { doc: OPS.add(doc, 'walls', wall), wall };
+    const next = OPS.reseedSplitRooms(doc, OPS.add(doc, 'walls', wall), floorId);
+    return { doc: next, wall };
   };
 
   /**
-   * Translate a partition wall by (dx,dy). Walls on the same floor whose endpoint touched the moved wall
-   * are stretched along their own axis so the joint is kept. Openings keep their `t`.
+   * After a wall change, give every newly enclosed region that used to belong to a room its own seed
+   * ("Sala 2", same floor material), so a room split by a new wall never loses its other half.
+   */
+  OPS.reseedSplitRooms = (prevDoc, nextDoc, floorId) => {
+    if (!DD.rooms) return nextDoc;
+    const before = DD.rooms.compute(prevDoc, floorId).filter((r) => !r.open && r.outer);
+    const STEP = 200;
+    let doc = nextDoc;
+    let added = 0;
+    const inRoom = (r, p) => U.pointInPolygon(p, r.outer) && !r.holes.some((h) => U.pointInPolygon(p, h));
+    const uniqueName = (base) => {
+      const names = new Set(doc.roomSeeds.filter((x) => x.floor === floorId).map((x) => x.name));
+      let n = 2;
+      while (names.has(base + ' ' + n)) n++;
+      return base + ' ' + n;
+    };
+    for (const R of before) {
+      for (let y = R.bbox.minY + STEP / 2; y < R.bbox.maxY && added < 8; y += STEP) {
+        for (let x = R.bbox.minX + STEP / 2; x < R.bbox.maxX && added < 8; x += STEP) {
+          const p = { x, y };
+          if (!inRoom(R, p) || DD.rooms.at(doc, floorId, x, y)) continue;
+          const walls = doc.walls.filter((w) => w.floor === floorId);
+          if (walls.some((w) => U.pointInPolygon(p, G.wallPolygon(w)))) continue;
+          const seed = {
+            id: U.uid('r'), floor: floorId, name: uniqueName(R.name.split(' + ')[0]),
+            x: Math.round(x), y: Math.round(y), material: R.material, planArea: null, outdoor: R.outdoor,
+          };
+          doc = OPS.add(doc, 'roomSeeds', seed);
+          added++;
+          const room = DD.rooms.compute(doc, floorId).find((r) => r.seedIds.indexOf(seed.id) >= 0);
+          if (!room || room.open || !room.outer) {
+            doc = OPS.remove(doc, 'roomSeeds', seed.id); // leaked to the outside: not a room
+            continue;
+          }
+          const c = { x: Math.round((room.bbox.minX + room.bbox.maxX) / 2), y: Math.round((room.bbox.minY + room.bbox.maxY) / 2) };
+          if (inRoom(room, c) && !walls.some((w) => U.pointInPolygon(c, G.wallPolygon(w))))
+            doc = OPS.update(doc, 'roomSeeds', seed.id, { x: c.x, y: c.y });
+        }
+      }
+    }
+    return doc;
+  };
+
+  /**
+   * Translate a partition wall by (dx,dy). Other PARTITIONS on the same floor whose endpoint touched the moved
+   * wall are stretched along their own axis so the joint is kept; locked walls (structural, muro, railing) are
+   * never changed. Openings of the moved wall keep their `t`; openings of stretched walls keep their world
+   * position (their `t` is re-based when the wall's `a` end moves).
    */
   OPS.moveWall = (doc, wallId, dx, dy) => {
     const w = OPS.byId(doc, 'walls', wallId);
@@ -313,9 +372,10 @@
     // belongs to that third wall too: stretching the perpendicular wall there would open a gap.
     const sharedJoint = (p, o) =>
       sameFloor.some((x) => x.id !== w.id && x.id !== o.id && U.segDist(p, x.a, x.b).d <= x.thick / 2 + 6);
+    const tShift = {}; // wallId -> mm to add to the t of its openings (when its `a` end moved)
     const walls = doc.walls.map((o) => {
       if (o.id === wallId) return moved;
-      if (o.floor !== w.floor) return o;
+      if (o.floor !== w.floor || !OPS.isEditableWall(o)) return o;
       const oL = U.dist(o.a, o.b) || 1;
       const od = { x: (o.b.x - o.a.x) / oL, y: (o.b.y - o.a.y) / oL };
       if (Math.abs(od.x * dir.x + od.y * dir.y) > 0.3) return o; // only roughly perpendicular walls
@@ -336,9 +396,15 @@
           }
         }
       });
-      return changed ? Object.assign({}, o, res) : o;
+      if (!changed) return o;
+      if (res.a !== o.a) tShift[o.id] = (o.a.x - res.a.x) * od.x + (o.a.y - res.a.y) * od.y;
+      return Object.assign({}, o, res);
     });
-    return Object.assign({}, doc, { walls });
+    const shifted = Object.keys(tShift).length;
+    const openings = shifted
+      ? doc.openings.map((op) => (tShift[op.wall] ? Object.assign({}, op, { t: op.t + tShift[op.wall] }) : op))
+      : doc.openings;
+    return Object.assign({}, doc, { walls, openings });
   };
   function lineIntersect(p1, p2, p3, p4) {
     const d = (p1.x - p2.x) * (p3.y - p4.y) - (p1.y - p2.y) * (p3.x - p4.x);
@@ -473,29 +539,35 @@
     return out;
   };
 
-  /** Stair geometry (U-stair: lower flight along +x on the far row, landing at x+length, upper flight back along -x). */
+  /**
+   * Stair geometry of a U-stair (as drawn on the approved plan: "Espelho=18cm", 16 risers for 2,88 m).
+   * Lower flight = far row (y+w/2..y+w) rising along +x with `lowerCount` treads; the landing spans both rows at
+   * the far end and is step lowerCount+1 (at 1,44 m); the upper flight = near row going back along −x with
+   * `upperCount` treads; the next floor is the last riser. riser = floorHeight / (lowerCount + upperCount + 2).
+   * `landingLabel` is the landing's first cell, where the plan prints the step number (8).
+   */
   G.stairGeometry = (st, floorHeight) => {
     const T = st.tread, W = st.width, hw = W / 2;
-    const risers = st.lowerCount + 1 + st.upperCount + 1;
+    const lower = Math.max(1, Math.round(st.lowerCount) || 1), upper = Math.max(1, Math.round(st.upperCount) || 1);
+    const risers = lower + upper + 2;
     const r = floorHeight / risers;
+    const landX = Math.min(st.x + Math.max(lower, upper) * T, st.x + st.length - T);
     const treads = [];
-    for (let i = 0; i < st.lowerCount; i++)
+    for (let i = 0; i < lower; i++)
       treads.push({ n: i + 1, x0: st.x + i * T, y0: st.y + hw, x1: st.x + (i + 1) * T, y1: st.y + W, z: (i + 1) * r, flight: 0 });
-    const landZ = (st.lowerCount + 1) * r;
-    const landing = [
-      { x0: st.x + st.lowerCount * T, y0: st.y + hw, x1: st.x + st.length, y1: st.y + W, z: landZ },
-      { x0: st.x + st.upperCount * T, y0: st.y, x1: st.x + st.length, y1: st.y + hw, z: landZ },
-    ];
-    for (let j = 0; j < st.upperCount; j++) {
-      const x1 = st.x + (st.upperCount - j) * T;
-      treads.push({ n: st.lowerCount + 1 + j, x0: x1 - T, y0: st.y, x1, y1: st.y + hw, z: (st.lowerCount + 2 + j) * r, flight: 1 });
+    const landZ = (lower + 1) * r;
+    const landing = [{ x0: landX, y0: st.y, x1: st.x + st.length, y1: st.y + W, z: landZ }];
+    for (let j = 0; j < upper; j++) {
+      const x1 = landX - j * T;
+      treads.push({ n: lower + 2 + j, x0: x1 - T, y0: st.y, x1, y1: st.y + hw, z: (lower + 2 + j) * r, flight: 1 });
     }
-    const midX = st.x + st.lowerCount * T + (st.length - st.lowerCount * T) / 2;
+    const midX = (landX + st.x + st.length) / 2;
     return {
       riser: r,
       risers,
       treads,
       landing,
+      landingLabel: { n: lower + 1, x0: landX, y0: st.y + hw, x1: landX + T, y1: st.y + W, z: landZ },
       footprint: { x0: st.x, y0: st.y, x1: st.x + st.length, y1: st.y + W },
       // walk line: up the lower flight, round the landing, back along the upper flight
       walkline: [
@@ -611,12 +683,14 @@
         const e = extentAlong(rot, f.n.x, f.n.y);
         const s = (res.x - f.a.x) * f.n.x + (res.y - f.a.y) * f.n.y; // signed distance of centre from face
         const gap = s - e;
-        if (s < -e * 0.5 || Math.abs(gap) > threshold) return; // behind the face or too far
+        if (s < 0 || gap > threshold) return; // centre behind the face, or too far away (any overlap snaps back)
         // must overlap the face segment along its direction
         const along = (res.x - f.a.x) * f.d.x + (res.y - f.a.y) * f.d.y;
         const hl = halfLenAlong(rot, f.d.x, f.d.y);
         if (along < -hl * 0.6 || along > f.L + hl * 0.6) return;
-        if (!bestC || Math.abs(gap) < Math.abs(bestC.gap)) bestC = { f, rot, gap };
+        // an item sunk into a wall is pushed out first; otherwise the nearest face wins
+        const better = !bestC || (gap < 0 && bestC.gap < 0 ? gap < bestC.gap : gap < 0 !== bestC.gap < 0 ? gap < 0 : Math.abs(gap) < Math.abs(bestC.gap));
+        if (better) bestC = { f, rot, gap };
       });
       return bestC;
     }
@@ -651,56 +725,107 @@
   };
 
   /**
-   * Dimension breakpoints for auto dimension chains around a floor.
-   * xs / ys: all faces of vertical / horizontal walls (structural + partition); xsExt / ysExt: only
-   * structural walls. bbox: extents of structural+partition walls.
+   * Dimension breakpoints for the automatic dimension chains around a floor, one list per facade (like the
+   * approved drawing): a wall contributes to a side only if it reaches that facade — its end looks out of the
+   * building on that side (the ray from it crosses no structural/partition wall and no indoor room), directly or
+   * through the facade wall it butts into. Upper floors also count railings and muros (balconies, terraces).
+   * Returns { bbox, top, bottom, left, right } (x lists for top/bottom, y lists for left/right, each including the
+   * bbox ends) plus the legacy aliases xs=top, xsExt=bottom, ys=left, ysExt=right. Cached per doc identity.
    */
+  const dimCache = new Map();
   G.dimensionData = (doc, floorId) => {
-    const ws = doc.walls.filter((w) => w.floor === floorId && (w.kind === 'structural' || w.kind === 'partition'));
+    const c = dimCache.get(floorId);
+    if (c && c.walls === doc.walls && c.seeds === doc.roomSeeds && c.seps === doc.separators && c.floors === doc.floors)
+      return c.data;
+    const data = computeDimensionData(doc, floorId);
+    dimCache.set(floorId, { walls: doc.walls, seeds: doc.roomSeeds, seps: doc.separators, floors: doc.floors, data });
+    return data;
+  };
+  function computeDimensionData(doc, floorId) {
+    const floor = OPS.floorById(doc, floorId);
+    const upper = !!floor && floor.level > 0;
+    const ws = doc.walls.filter(
+      (w) => w.floor === floorId && U.dist(w.a, w.b) > 1 &&
+        (w.kind === 'structural' || w.kind === 'partition' || (upper && (w.kind === 'railing' || w.kind === 'muro')))
+    );
+    if (!ws.length) return null;
+    const polys = new Map(ws.map((w) => [w.id, G.wallPolygon(w)]));
+    const blockers = ws.filter((w) => w.kind === 'structural' || w.kind === 'partition');
     const bbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
-    const xs = [], ys = [], xsExt = [], ysExt = [];
-    ws.forEach((w) => {
-      G.wallPolygon(w).forEach((p) => {
+    polys.forEach((poly) =>
+      poly.forEach((p) => {
         bbox.minX = Math.min(bbox.minX, p.x);
         bbox.minY = Math.min(bbox.minY, p.y);
         bbox.maxX = Math.max(bbox.maxX, p.x);
         bbox.maxY = Math.max(bbox.maxY, p.y);
+      })
+    );
+    const indoor = DD.rooms ? DD.rooms.compute(doc, floorId).filter((r) => !r.open && r.outer && !r.outdoor) : [];
+    const DIRS = { top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 }, left: { x: -1, y: 0 }, right: { x: 1, y: 0 } };
+    const isVertical = (w) => Math.abs(w.a.x - w.b.x) < 1;
+    const isHorizontal = (w) => Math.abs(w.a.y - w.b.y) < 1;
+    const inWall = (p, id) => U.pointInPolygon(p, polys.get(id));
+    // walk outwards from p until past the bbox: blocked by structural/partition walls or indoor rooms
+    const rayClear = (p, dir, ignore) => {
+      const reach = Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY) + 200;
+      for (let d = 0; d <= reach; d += 50) {
+        const q = { x: p.x + dir.x * d, y: p.y + dir.y * d };
+        if (q.x < bbox.minX - 1 || q.x > bbox.maxX + 1 || q.y < bbox.minY - 1 || q.y > bbox.maxY + 1) return true;
+        if (blockers.some((w) => ignore.indexOf(w.id) < 0 && inWall(q, w.id))) return false;
+        if (indoor.some((r) => U.pointInPolygon(q, r.outer))) return false;
+      }
+      return true;
+    };
+    const facePoint = (w, dir) => {
+      // point on the wall's polygon furthest along dir (its end or face towards the side), nudged out 2 mm
+      let best = null;
+      polys.get(w.id).forEach((p) => {
+        const v = p.x * dir.x + p.y * dir.y;
+        if (!best || v > best.v + 0.5) best = { v, p };
       });
-      const vertical = Math.abs(w.a.x - w.b.x) < 1;
-      const horizontal = Math.abs(w.a.y - w.b.y) < 1;
-      if (vertical) {
-        xs.push(w.a.x - w.thick / 2, w.a.x + w.thick / 2);
-        if (w.kind === 'structural') xsExt.push(w.a.x - w.thick / 2, w.a.x + w.thick / 2);
-      }
-      if (horizontal) {
-        ys.push(w.a.y - w.thick / 2, w.a.y + w.thick / 2);
-        if (w.kind === 'structural') ysExt.push(w.a.y - w.thick / 2, w.a.y + w.thick / 2);
-      }
-    });
-    const uniq = (arr) => {
-      const s = arr.slice().sort((a, b) => a - b);
+      const mid = { x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 };
+      const along = dir.x ? { x: best.p.x, y: mid.y } : { x: mid.x, y: best.p.y };
+      return { x: along.x + dir.x * 2, y: along.y + dir.y * 2 };
+    };
+    const isFacade = (w, dir) => rayClear(facePoint(w, dir), dir, [w.id]);
+    const reaches = (w, dir) => {
+      const start = facePoint(w, dir);
+      const touched = ws.find((o) => o.id !== w.id && inWall(start, o.id));
+      if (!touched) return rayClear(start, dir, [w.id]);
+      const perpendicular = dir.x ? isVertical(touched) : isHorizontal(touched);
+      return perpendicular && isFacade(touched, dir);
+    };
+    const uniq = (arr, lo, hi) => {
       const out = [];
-      s.forEach((v) => {
+      arr.concat([lo, hi]).filter((v) => v >= lo - 1 && v <= hi + 1).sort((a, b) => a - b).forEach((v) => {
         if (!out.length || v - out[out.length - 1] > 4) out.push(Math.round(v));
       });
       return out;
     };
-    if (!ws.length) return null;
-    const clampList = (arr, lo, hi) => uniq(arr.concat([lo, hi])).filter((v) => v >= lo - 1 && v <= hi + 1);
-    return {
-      bbox,
-      xs: clampList(xs, bbox.minX, bbox.maxX),
-      ys: clampList(ys, bbox.minY, bbox.maxY),
-      xsExt: clampList(xsExt, bbox.minX, bbox.maxX),
-      ysExt: clampList(ysExt, bbox.minY, bbox.maxY),
+    const side = (name) => {
+      const dir = DIRS[name];
+      const vals = [];
+      ws.forEach((w) => {
+        const across = dir.y ? isVertical(w) : isHorizontal(w);
+        // slim guards (e.g. the 50 mm steel guard at the stair void) bound the bbox but are not dimensioned
+        if (!across || w.thick < 100 || !reaches(w, dir)) return;
+        const c = dir.y ? w.a.x : w.a.y;
+        vals.push(c - w.thick / 2, c + w.thick / 2);
+      });
+      return dir.y ? uniq(vals, bbox.minX, bbox.maxX) : uniq(vals, bbox.minY, bbox.maxY);
     };
-  };
+    const top = side('top'), bottom = side('bottom'), left = side('left'), right = side('right');
+    return { bbox, top, bottom, left, right, xs: top, xsExt: bottom, ys: left, ysExt: right };
+  }
 
   // ------------------------------------------------------------------ rooms (automatic detection)
   // Walls are rasterised on a 10 mm grid; each room seed flood-fills its region; the region outline is traced
   // back into a rectilinear polygon. Area = cell count × 1e-4 m² (exact for walls on a 10 mm grid).
-  const CELL = 10;
+  const CELL = 10; // exact grid (mm)
+  const CELL_PREVIEW = 25; // coarser grid while a gesture (e.g. a wall drag) is re-shaping rooms every frame
+  const FAR = 20000; // geometry farther than this outside the lot is ignored by room detection
   const roomCache = new Map();
+  const inGesture = () => !!(DD.store && DD.store.inGesture && DD.store.inGesture());
   // Scratch buffers reused between computations (a wall drag recomputes rooms every frame).
   const pool = {};
   function scratch(name, Ctor, size, fill) {
@@ -711,10 +836,12 @@
     return view;
   }
 
-  function rasterizeFloor(doc, floorId) {
-    const walls = doc.walls.filter((w) => w.floor === floorId);
-    const seps = (doc.separators || []).filter((s) => s.floor === floorId);
-    const seeds = doc.roomSeeds.filter((s) => s.floor === floorId);
+  function rasterizeFloor(doc, floorId, CELL) {
+    const lot = (doc.site && doc.site.lot) || { w: 9000, h: 20000 };
+    const near = (p) => p.x > -FAR && p.y > -FAR && p.x < lot.w + FAR && p.y < lot.h + FAR;
+    const walls = doc.walls.filter((w) => w.floor === floorId && near(w.a) && near(w.b) && U.dist(w.a, w.b) > 1);
+    const seps = (doc.separators || []).filter((s) => s.floor === floorId && near(s.a) && near(s.b));
+    const seeds = doc.roomSeeds.filter((s) => s.floor === floorId && near(s));
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const grow = (p) => {
       minX = Math.min(minX, p.x);
@@ -833,8 +960,11 @@
   function computeRooms(doc, floorId) {
     const key = floorId;
     const c = roomCache.get(key);
-    if (c && c.walls === doc.walls && c.seeds === doc.roomSeeds && c.seps === doc.separators) return c.rooms;
-    const R = rasterizeFloor(doc, floorId);
+    const coarse = inGesture();
+    if (c && c.walls === doc.walls && c.seeds === doc.roomSeeds && c.seps === doc.separators && (!c.coarse || coarse))
+      return c.rooms;
+    const CELL = coarse ? CELL_PREVIEW : DD.rooms.CELL;
+    const R = rasterizeFloor(doc, floorId, CELL);
     const rooms = [];
     if (R) {
       const { x0, y0, W, H, blocked, barR, barD, seeds } = R;
@@ -953,7 +1083,7 @@
         rooms.push(room);
       });
     }
-    roomCache.set(key, { walls: doc.walls, seeds: doc.roomSeeds, seps: doc.separators, rooms });
+    roomCache.set(key, { walls: doc.walls, seeds: doc.roomSeeds, seps: doc.separators, rooms, coarse });
     return rooms;
   }
 
@@ -1014,19 +1144,110 @@
         /* storage unavailable */
       }
     },
-    /** Minimal schema validation for loaded/imported documents; returns the doc or null. */
-    validate(doc) {
-      if (!doc || typeof doc !== 'object') return null;
+    /**
+     * Schema validation for loaded/imported documents. Returns a NEW, normalised doc or null.
+     * Structural problems (no floors, duplicate floor ids, too many broken items) reject the file; items with
+     * a bad optional field get defaults; items with bad required fields are dropped (count in lastDropped).
+     */
+    lastDropped: 0,
+    validate(input) {
+      DD.persist.lastDropped = 0;
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
       const arrays = ['floors', 'walls', 'openings', 'roomSeeds', 'stairs', 'furniture'];
-      for (const k of arrays) if (!Array.isArray(doc[k])) return null;
+      for (const k of arrays) if (!Array.isArray(input[k])) return null;
       const num = (v) => typeof v === 'number' && isFinite(v);
-      if (!doc.walls.every((w) => w && w.id && w.floor && w.a && w.b && num(w.a.x) && num(w.a.y) && num(w.b.x) && num(w.b.y) && num(w.thick)))
-        return null;
-      if (!doc.furniture.every((f) => f && f.id && f.type && num(f.x) && num(f.y) && num(f.w) && num(f.d))) return null;
-      doc.separators = Array.isArray(doc.separators) ? doc.separators : [];
-      doc.measures = Array.isArray(doc.measures) ? doc.measures : [];
-      if (!doc.site) doc.site = DD.data.initialState().site;
-      return doc;
+      const str = (v, max) => (typeof v === 'string' && v.length > 0 && v.length <= (max || 80) ? v : null);
+      const pt = (p) => (p && num(p.x) && num(p.y) && Math.abs(p.x) < 1e6 && Math.abs(p.y) < 1e6 ? { x: p.x, y: p.y } : null);
+      const floors = [];
+      const floorIds = new Set();
+      for (const f of input.floors) {
+        if (!f || !str(f.id, 40) || floorIds.has(f.id) || !num(f.level) || !num(f.height) || f.height <= 0) return null;
+        floorIds.add(f.id);
+        floors.push({
+          id: f.id, name: str(f.name, 60) || f.id, short: str(f.short, 4) || '', level: f.level, height: f.height,
+          ceiling: num(f.ceiling) && f.ceiling > 0 ? f.ceiling : f.height - 100,
+        });
+      }
+      if (!floors.length) return null;
+      let dropped = 0, total = 0;
+      const keep = (list, fn) =>
+        list.map((it) => {
+          total++;
+          const r = it && typeof it === 'object' ? fn(it) : null;
+          if (!r) dropped++;
+          return r;
+        }).filter(Boolean);
+      const KINDS = ['structural', 'partition', 'muro', 'railing'];
+      const walls = keep(input.walls, (w) => {
+        const a = pt(w.a), b = pt(w.b);
+        if (!str(w.id, 80) || !floorIds.has(w.floor) || !a || !b || !num(w.thick) || w.thick <= 0 || w.thick > 2000) return null;
+        const kind = KINDS.indexOf(w.kind) >= 0 ? w.kind : 'partition';
+        const out = { id: w.id, floor: w.floor, a, b, thick: w.thick, kind, height: num(w.height) && w.height > 0 ? w.height : DD.data.KIND_HEIGHT[kind] };
+        if (num(w.mureta) && w.mureta >= 0) out.mureta = w.mureta;
+        return out;
+      });
+      const wallIds = new Set(walls.map((w) => w.id));
+      const openings = keep(input.openings, (o) => {
+        if (!str(o.id, 80) || !wallIds.has(o.wall) || !num(o.t) || !num(o.width) || o.width <= 0 || !num(o.height) || o.height <= 0) return null;
+        if (o.type !== 'door' && o.type !== 'window') return null;
+        return {
+          id: o.id, wall: o.wall, code: str(o.code, 12) || (o.type === 'door' ? 'P' : 'J'), type: o.type, t: o.t,
+          width: o.width, height: o.height, sill: num(o.sill) && o.sill >= 0 ? o.sill : 0,
+          style: str(o.style, 20) || (o.type === 'door' ? 'swing' : 'slide2'),
+          hinge: o.hinge === 'end' ? 'end' : 'start', side: o.side === -1 ? -1 : 1,
+        };
+      });
+      const roomSeeds = keep(input.roomSeeds, (r) => {
+        if (!str(r.id, 80) || !floorIds.has(r.floor) || !num(r.x) || !num(r.y)) return null;
+        return {
+          id: r.id, floor: r.floor, name: str(String(r.name == null ? '' : r.name).slice(0, 60), 60) || 'Ambiente',
+          x: r.x, y: r.y, material: str(r.material, 40) || 'porcelanato',
+          planArea: num(r.planArea) ? r.planArea : null, outdoor: r.outdoor === true,
+        };
+      });
+      const int = (v, lo, hi) => (num(v) && Math.round(v) === v && v >= lo && v <= hi ? v : null);
+      const stairs = keep(input.stairs, (st) => {
+        if (!str(st.id, 80) || !floorIds.has(st.floor) || !num(st.x) || !num(st.y)) return null;
+        if (!(num(st.length) && st.length > 0 && num(st.width) && st.width > 0 && num(st.tread) && st.tread > 50)) return null;
+        const lower = int(st.lowerCount, 1, 30), upper = int(st.upperCount, 1, 30);
+        if (lower == null || upper == null) return null;
+        return { id: st.id, floor: st.floor, x: st.x, y: st.y, length: st.length, width: st.width, tread: st.tread, lowerCount: lower, upperCount: upper };
+      });
+      const HEX = /^#[0-9a-fA-F]{6}$/;
+      const furniture = keep(input.furniture, (f) => {
+        if (!str(f.id, 80) || !floorIds.has(f.floor) || !str(f.type, 40) || !num(f.x) || !num(f.y)) return null;
+        if (!(num(f.w) && f.w > 0 && f.w <= 20000 && num(f.d) && f.d > 0 && f.d <= 20000)) return null;
+        const def = DD.catalog && DD.catalog.types ? DD.catalog.types[f.type] : null;
+        return {
+          id: f.id, floor: f.floor, type: f.type, x: f.x, y: f.y, rot: num(f.rot) ? U.normDeg(f.rot) : 0, w: f.w, d: f.d,
+          h: num(f.h) && f.h > 0 ? f.h : def ? def.h : 800, elev: num(f.elev) ? f.elev : 0,
+          color: typeof f.color === 'string' && HEX.test(f.color) ? f.color : null,
+        };
+      });
+      const segs = (list) =>
+        keep(Array.isArray(list) ? list : [], (m) => {
+          const a = pt(m.a), b = pt(m.b);
+          return str(m.id, 80) && floorIds.has(m.floor) && a && b ? { id: m.id, floor: m.floor, a, b } : null;
+        });
+      const separators = segs(input.separators);
+      const measures = segs(input.measures);
+      if (total && dropped / total > 0.2) return null;
+      DD.persist.lastDropped = dropped;
+      const defaults = DD.data.initialState();
+      const ZONES = ['grass', 'paving', 'driveway'];
+      const inSite = input.site && input.site.lot && num(input.site.lot.w) && num(input.site.lot.h) ? input.site : null;
+      const site = inSite
+        ? {
+            lot: { w: inSite.lot.w, h: inSite.lot.h },
+            street: str(inSite.street, 60) || defaults.site.street,
+            northDeg: num(inSite.northDeg) ? inSite.northDeg : defaults.site.northDeg,
+            zones: (Array.isArray(inSite.zones) ? inSite.zones : [])
+              .filter((z) => z && ZONES.indexOf(z.kind) >= 0 && num(z.x) && num(z.y) && num(z.w) && num(z.h) && z.w > 0 && z.h > 0)
+              .map((z) => ({ id: str(z.id, 80) || U.uid('z'), kind: z.kind, x: z.x, y: z.y, w: z.w, h: z.h })),
+          }
+        : defaults.site;
+      const meta = { name: (input.meta && str(input.meta.name, 80)) || defaults.meta.name, source: (input.meta && str(input.meta.source, 120)) || defaults.meta.source };
+      return { version: 1, meta, floors, walls, openings, roomSeeds, separators, stairs, furniture, measures, site };
     },
     downloadJSON(doc, filename) {
       const blob = new Blob([JSON.stringify(doc, null, 1)], { type: 'application/json' });

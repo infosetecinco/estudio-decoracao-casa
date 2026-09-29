@@ -79,6 +79,7 @@
     upperCabinet: T('Armário aéreo', 'cozinha', 1200, 350, 700, '#EDEAE4', { elev: 1500 }),
     island: T('Ilha de cozinha', 'cozinha', 1600, 900, 900, '#EDEAE4'),
     washer: T('Máquina de lavar', 'cozinha', 600, 650, 850, '#F2F2F0'),
+    tanque: T('Tanque', 'cozinha', 600, 550, 900, '#D9D6CF', FIX),
     shelves: T('Estante metálica', 'cozinha', 900, 400, 1800, '#8A8F94'),
     // banheiro
     toilet: T('Vaso sanitário', 'banheiro', 380, 650, 780, '#F4F3F0', FIX),
@@ -652,6 +653,33 @@
     g.circle(0, cy, r * 0.68, g.D(TONE.glass));
   }
 
+  /** Laundry tub (tanque): deep bowl at the back with drain, ribbed washboard sloping into it at the front, tap. */
+  function paintTanque(g) {
+    const { hw, hd, w, d, c } = g;
+    const rim = clamp(Math.min(w, d) * 0.07, 25, 60);
+    g.box(-hw, -hd, hw, hd, g.O(c.fill), 18);
+    const x0 = -hw + rim, x1 = hw - rim, y0 = -hd + rim * 1.4, y1 = hd - rim;
+    const split = y0 + (y1 - y0) * 0.56; // bowl | washboard
+    const br = clamp(Math.min(w, d) * 0.08, 10, 50);
+    const bi = Math.min(rim * 0.6, (split - y0) * 0.2);
+    g.box(x0, y0, x1, split, g.D(c.soft), br);
+    g.box(x0 + bi, y0 + bi, x1 - bi, split - bi * 0.3, g.D(TONE.glass), br * 0.8);
+    g.circle(0, (y0 + split) / 2 + (split - y0) * 0.12, Math.min(w, split - y0) * 0.07, g.D(TONE.steel));
+    // washboard (esfregador): ribs parallel to the front edge, lip where it meets the bowl
+    g.box(x0, split, x1, y1, g.D(c.mid), 8);
+    const ribs = clamp(Math.round((y1 - split) / 28), 2, 14);
+    for (let i = 1; i < ribs; i++) {
+      const y = split + ((y1 - split) * i) / ribs;
+      g.line(x0 + rim * 0.5, y, x1 - rim * 0.5, y, g.S(c.deep, LW_DET * 0.8));
+    }
+    g.line(x0, split, x1, split, g.S(INK, LW_DET * 1.4));
+    // wall tap over the bowl
+    const tx = -w * 0.18, ty = -hd + rim * 0.7;
+    g.circle(tx, ty, clamp(w * 0.035, 10, 24), g.D(TONE.steel));
+    g.line(tx, ty, tx, ty + clamp(d * 0.2, 40, 140), g.S(INK, 2));
+    g.line(tx - clamp(w * 0.05, 12, 30), ty, tx + clamp(w * 0.05, 12, 30), ty, g.S(INK, 1.6));
+  }
+
   function paintShelves(g) {
     const { hw, hd, w, d, c } = g;
     g.box(-hw, -hd, hw, hd, g.O(c.soft), 4);
@@ -921,6 +949,7 @@
     upperCabinet: paintUpperCabinet,
     island: paintIsland,
     washer: paintWasher,
+    tanque: paintTanque,
     shelves: paintShelves,
     toilet: paintToilet,
     basin: paintBasin,
@@ -1009,7 +1038,8 @@
   // ================================================================== default layout
   // Positions are item centres in world mm; rot follows CONTRACT §1 (back to top wall 0, right 90, bottom 180,
   // left 270). Each row: [type, x, y, rot, overrides?]. Verified by tools/test-layout.js (rooms, walls, stairs,
-  // door swings, circulation, overlaps).
+  // door swings & approaches derived from the openings, windows kept free above their sill, front access of
+  // storage/appliances, chair pull-out, car doors, circulation, overlaps).
   const LAYOUT = Object.freeze({
     f0: [
       // Cozinha — galley: counters on the left wall (sink under the window), fridge + counter on the right wall
@@ -1021,22 +1051,23 @@
       ['fridge', 3775, 5000, 90],
       ['counter', 3850, 5860, 90],
       ['upperCabinet', 3975, 5860, 90, { w: 1000 }],
-      ['dining4', 2425, 7550, 90, { d: 1550 }],
-      // Despensa
+      // table below the stove, 0,75 m from the wall to sit down, clear of the P1 swing
+      ['dining4', 2750, 7400, 90, { w: 1000, d: 1400 }],
+      // Despensa — shelves on the back wall and a shorter run on the right, both reachable from the door
       ['shelves', 4850, 3200, 0, { w: 1100 }],
-      ['shelves', 5200, 3900, 90],
-      // Suíte (banheiro)
-      ['shower', 5950, 3400, 0, { w: 800, d: 800 }],
-      ['toilet', 6850, 3325, 0],
+      ['shelves', 5200, 4200, 90, { w: 700 }],
+      // Suíte (banheiro) — box in the corner away from the J1 window, toilet under it
+      ['shower', 6950, 3400, 0, { w: 800, d: 800 }],
+      ['toilet', 6200, 3325, 0],
       ['basin', 5780, 4230, 270, { w: 700 }],
-      // Quarto
-      ['bedDouble', 5825, 5725, 0],
-      ['nightstand', 4890, 4950, 0],
-      ['nightstand', 6760, 4950, 0],
-      ['rug', 5825, 6500, 0, { w: 1800, d: 1300 }],
-      ['wardrobe', 4600, 7550, 270],
-      ['desk', 5650, 8300, 180],
-      ['officeChair', 5650, 7760, 0],
+      // Quarto — bed group left of the P2 doorway (suíte), wardrobe on the left wall, desk by the P1 door
+      ['bedDouble', 5450, 5725, 0],
+      ['nightstand', 4525, 4950, 0],
+      ['nightstand', 6350, 4950, 0, { w: 400 }],
+      ['rug', 5450, 6250, 0, { w: 2000, d: 1200 }],
+      ['wardrobe', 4600, 7750, 270, { w: 1700 }],
+      ['desk', 5950, 8300, 180, { w: 900 }],
+      ['officeChair', 5950, 7760, 0],
       // Lavabo
       ['basin', 1880, 9150, 270, { w: 700 }],
       ['toilet', 2500, 10025, 180],
@@ -1049,18 +1080,18 @@
       ['armchair', 8440, 14250, 90],
       ['sideTable', 7775, 14450, 0],
       ['bookshelf', 4475, 13650, 270],
-      ['plant', 4600, 14560, 0],
-      // Garagem
-      ['car', 2150, 12870, 0],
+      ['plant', 4575, 10700, 0],
+      // Garagem — ≥ 0,60 m beside both car doors; bike parked below the shelves
+      ['car', 1700, 12870, 0],
       ['shelves', 3950, 11950, 90],
-      ['bike', 450, 11700, 0],
+      ['bike', 3850, 13600, 0],
     ],
     f1: [
-      // Closets
-      ['wardrobe', 2275, 3300, 0, { w: 1250 }],
-      ['wardrobe', 3525, 3300, 0, { w: 1250 }],
-      ['wardrobe', 5060, 3300, 0, { w: 1520 }],
-      ['wardrobe', 6590, 3300, 0, { w: 1520 }],
+      // Closets — wardrobes stop 0,60 m short of the walls with the J6 windows, leaving the glazing clear
+      ['wardrobe', 2725, 3300, 0, { w: 950 }],
+      ['wardrobe', 3675, 3300, 0, { w: 950 }],
+      ['wardrobe', 4913, 3300, 0, { w: 1225 }],
+      ['wardrobe', 6138, 3300, 0, { w: 1225 }],
       ['rug', 5900, 4100, 0, { w: 1400, d: 700 }],
       // Quarto Master
       ['rug', 5050, 6740, 90, { w: 2400, d: 1600 }],
@@ -1109,13 +1140,14 @@
       ['armchair', 8450, 15410, 0],
     ],
     f2: [
-      // Varanda coberta (área gourmet)
-      ['plant', 1925, 3325, 0],
-      ['counter', 1950, 4380, 270],
-      ['kitchenSink', 1950, 5940, 270, { w: 2100 }],
-      ['counter', 1950, 7450, 270, { w: 900 }],
-      ['fridge', 1950, 8275, 270, { w: 650, d: 600 }],
-      ['bbq', 2650, 8300, 180, { w: 700 }],
+      // Varanda coberta (área gourmet) — run on the left wall: churrasqueira, pia under the J2, bancada, geladeira
+      ['bbq', 1950, 3450, 270],
+      ['kitchenSink', 1950, 4950, 270, { w: 2100 }],
+      ['counter', 1950, 6300, 270, { w: 600 }],
+      ['fridge', 1950, 6925, 270, { w: 650, d: 600 }],
+      // área de serviço (as in the approved plan): máquina de lavar + tanque against the lavabo wall
+      ['washer', 1950, 8275, 180],
+      ['tanque', 2700, 8325, 180],
       ['sideboard', 4700, 3225, 0],
       ['dining8', 4700, 5000, 0],
       ['plant', 7050, 3325, 0],
@@ -1123,7 +1155,7 @@
       ['outdoorSofa', 6950, 7650, 90],
       ['coffeeTable', 5950, 7650, 90],
       ['armchair', 5060, 7650, 270],
-      ['plant', 5850, 10050, 0],
+      ['plant', 5800, 10050, 0],
       // Lavabo
       ['basin', 1880, 9300, 270, { w: 700 }],
       ['toilet', 2575, 10025, 180],
@@ -1134,7 +1166,7 @@
       ['lounger', 2900, 13450, 0],
       ['plant', 450, 14550, 0],
       ['plant', 5600, 10850, 0],
-      ['outdoorTable', 6000, 13000, 0],
+      ['outdoorTable', 5900, 13150, 0],
       ['outdoorSofa', 8450, 11600, 90],
       ['coffeeTable', 7400, 11600, 90],
       ['planter', 8650, 13450, 90],

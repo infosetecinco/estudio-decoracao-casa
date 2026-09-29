@@ -75,9 +75,32 @@ test('aerial pose looks at the active floor from the street side, above it', () 
   const pose = P.aerialPose(doc, 'f1');
   ok(pose.pos.z > pose.target.z, 'camera on the street side (+Z)');
   ok(pose.pos.y > pose.target.y + 5, 'camera well above the target');
-  near(pose.target.y, 2.88 + 0.9, 1e-9, 'target at the floor level');
-  const b = P.floorBounds(doc, 'f1');
-  near(pose.target.x, ((b.minX + b.maxX) / 2) / 1000, 1e-9);
+  const box = P.houseBox(doc, 'f1');
+  ok(pose.target.y > 0 && pose.target.y < box.z1 / 1000, 'target within the height of the floors shown');
+});
+test('aerial framing fits the house to the viewport aspect (70–85% of the limiting dimension, centred)', () => {
+  [['f0', false], ['f1', false], ['f2', false], ['f0', true]].forEach(([fid, all]) =>
+    [0.49, 0.99, 1.6, 2.2].forEach((aspect) => {
+      const pose = P.aerialPose(doc, fid, { aspect, fov: 45, allFloors: all });
+      const n = P.boxNdc(P.houseBox(doc, fid, all), pose, aspect, 45);
+      const tag = fid + (all ? '+all' : '') + '@' + aspect;
+      ok(n.minX >= -0.86 && n.maxX <= 0.86 && n.minY >= -0.86 && n.maxY <= 0.86, tag + ' inside the view ' + JSON.stringify(n));
+      const fill = Math.max((n.maxX - n.minX) / 2, (n.maxY - n.minY) / 2);
+      ok(fill >= 0.7 && fill <= 0.85, tag + ' fill ' + fill.toFixed(3));
+      near((n.minX + n.maxX) / 2, 0, 0.02, tag + ' centred x');
+      near((n.minY + n.maxY) / 2, 0, 0.02, tag + ' centred y');
+    })
+  );
+});
+test('house box: 2º Pav includes the terrace railing, excludes the lot muros; all floors reach the parapet', () => {
+  const b2 = P.houseBox(doc, 'f2');
+  ok(b2.maxY >= 14925 + 75 - 1, 'terrace guard inside (maxY ' + b2.maxY + ')');
+  ok(b2.minY > 2000, 'back muro (y 75) excluded');
+  const b0 = P.houseBox(doc, 'f0');
+  ok(b0.minY > 2000 && b0.maxY < 17000, 'Térreo: no ground muros');
+  near(b0.z1, 2880, 1e-6, 'Térreo height');
+  const all = P.houseBox(doc, 'f0', true);
+  near(all.z1, 5760 + 2880 + 120 + 1000, 1e-6, 'roof slab + 1,00 m platibanda');
 });
 test('easeInOutCubic endpoints and symmetry', () => {
   near(P.easeInOutCubic(0), 0);
@@ -210,7 +233,7 @@ test('walls stop the walker', () => {
 
 // ------------------------------------------------------------------ spawn
 test('spawn points per floor are collision free and face the requested direction', () => {
-  [['f0', 0, 0], ['f1', 2880, -Math.PI / 2], ['f2', 5760, 0]].forEach(([fid, level, yaw]) => {
+  [['f0', 0, 0], ['f1', 2880, Math.PI / 2], ['f2', 5760, 0]].forEach(([fid, level, yaw]) => {
     const sp = P.spawnFor(doc, fid, colliders);
     near(sp.feet, level, 1e-9, fid + ' level');
     near(sp.yaw, yaw, 1e-9, fid + ' yaw');
@@ -224,6 +247,70 @@ test('spawn is nudged out of furniture placed on it', () => {
   const sp = P.spawnFor(d2, 'f0', cols);
   ok(Math.hypot(sp.x - 5500, sp.y - 13900) > 300, 'moved away');
   ok(!P.overlapsAny(sp.x, sp.y, 250, P.bodyColliders(cols, 0)), 'free spot');
+});
+
+
+test('spawn points look into open space (no wall or furniture within 2 m ahead at eye level)', () => {
+  doc.floors.forEach((f) => {
+    const sp = P.spawnFor(doc, f.id, colliders);
+    const d = P.dirFromYaw(sp.yaw);
+    const body = P.bodyColliders(colliders, sp.feet);
+    for (let s = 300; s <= 2000; s += 100) ok(!P.overlapsAny(sp.x + d.x * s, sp.y + d.y * s, 60, body), f.id + ' blocked at ' + s + ' mm');
+  });
+});
+
+// ------------------------------------------------------------------ stair structure: head clearance, slabs
+test('stair slabs: lower slab ends under the landing, upper slab starts at the landing underside', () => {
+  const st = doc.stairs[0];
+  const g = DD.geom.stairGeometry(st, 2880);
+  const [lo, up] = P.stairSlabs(st, g);
+  const land = g.landing[0];
+  near(lo.top(lo.x1), land.z - 150, 1e-6, 'lower slab meets the landing underside');
+  ok(lo.x1 > land.x0 && lo.x1 <= land.x1, 'lower slab end under the landing');
+  near(up.top(up.x1), land.z - 150, 1e-6, 'upper slab starts at the landing underside');
+  near(up.x0, st.x, 1e-6, 'upper slab reaches the stair start');
+  g.treads.forEach((t) => {
+    const s = t.flight === 0 ? lo : up;
+    const back = t.flight === 0 ? t.x1 : t.x0;
+    near(s.top(back), t.z - 150, 1e-6, 'slab under the back edge of tread ' + t.n);
+  });
+});
+test('walker never stands with the head inside the stair: underside ≥ feet + 1,80 m wherever it can walk', () => {
+  const st = doc.stairs[0];
+  for (let x = st.x; x <= st.x + st.length; x += 25)
+    for (let y = st.y; y <= st.y + st.width; y += 25) {
+      const s = P.chooseSurface(P.surfacesAt(ctx, x, y), 0, P.ceilingsAt(ctx, x, y));
+      if (s.blocked || s.z > 1) continue; // on the stair itself, or not walkable
+      P.ceilingsAt(ctx, x, y).forEach((c) => ok(c <= 1 || c >= 1800, 'head room ' + c + ' at ' + x + ',' + y));
+    }
+});
+test('Térreo: the low end of the upper flight blocks (QA: x 7400–7700 under the flight)', () => {
+  [7400, 7550, 7700].forEach((x) => ok(P.chooseSurface(P.surfacesAt(ctx, x, 9150), 0, P.ceilingsAt(ctx, x, 9150)).blocked, 'x ' + x));
+  ok(!P.chooseSurface(P.surfacesAt(ctx, 6825, 9150), 0, P.ceilingsAt(ctx, 6825, 9150)).blocked, 'Quarto door axis stays walkable');
+});
+
+// ------------------------------------------------------------------ railings & windows through two floors
+test('railing mureta: wall.mureta, absent → 300, clamped to the height', () => {
+  const w = (id) => doc.walls.find((x) => x.id === id);
+  near(P.muretaOf(w('w1_guardaCorpo')), 300);
+  near(P.muretaOf(w('w2_guardaCorpoFrente')), 800);
+  near(P.muretaOf(w('w2_guardaEscada')), 0);
+  near(P.muretaOf({ height: 1000 }), 300);
+  near(P.muretaOf({ height: 200, mureta: 500 }), 200);
+});
+test('J5 stair windows continue into the wall of the floor above (2,20–3,80 m)', () => {
+  const list = P.windowContinuations(doc);
+  const a = list.find((c) => c.opId === 'o0_j5_escada');
+  const b = list.find((c) => c.opId === 'o1_j5_escada');
+  ok(a && a.upperWall === 'w1_masterBottom', 'Térreo J5 → w1_masterBottom');
+  ok(b && b.upperWall === 'w2_escadaTop', '1º Pav J5 → w2_escadaTop');
+  near(a.t, 5100, 1);
+  near(b.t, 2005, 1);
+  near(a.width, 1200, 1);
+  near(a.height, 920, 1e-6, '2200 + 1600 − 2880');
+  ok(a.cut.y0 <= 8600 && a.cut.y1 >= 8750 && a.cut.x0 <= 7575 && a.cut.x1 >= 8775, 'slab band cleared');
+  ok(!list.some((c) => c.opId === 'o0_j1_desp'), 'windows below the wall top do not continue');
+  ok(P.windowContinuations(doc) === list, 'cached per document');
 });
 
 if (failures.length) {
