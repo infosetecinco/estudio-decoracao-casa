@@ -1,0 +1,8 @@
+# local build output (the published page is index.html)
+casa-decoracao.html
+# node deps installed only for tests
+tools/.three/
+node_modules/
+# local tooling
+.claude/
+tools/ui-harness.html

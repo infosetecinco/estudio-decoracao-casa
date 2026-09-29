@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prévia de materiais</title>
+<style>
+  :root {
+    --bg: #151412; --panel: #1E1D1A; --panel-2: #26241F; --line: #34312B;
+    --text: #EDE8DF; --muted: #A39A8C; --accent: #E0703F; --accent-2: #2BA3A3; --danger: #E5484D;
+    --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 "Space Grotesk", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
+    padding: 14px 20px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); }
+  label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
+  #summary { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  main { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; padding: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .card canvas { display: block; width: 100%; aspect-ratio: 1; cursor: zoom-in; image-rendering: auto; }
+  .meta { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 10px 12px 12px; }
+  .meta h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .meta .spec { display: flex; gap: 8px; align-items: center; grid-column: 1 / 3; }
+  .meta .id, .meta .num { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .meta .desc { grid-column: 1 / 3; color: var(--muted); font-size: 12.5px; }
+  .chip { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--line); }
+  .swatches { display: flex; gap: 8px; align-items: end; grid-column: 1 / 3; margin-top: 4px; }
+  .swatches img { border-radius: 4px; border: 1px solid var(--line); }
+  .slow { color: var(--danger); }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--panel-2); color: var(--accent-2); }
+  #zoom { position: fixed; inset: 0; z-index: 5; display: none; background: rgba(0, 0, 0, .82); overflow: auto; cursor: zoom-out; }
+  #zoom.open { display: block; }
+  #zoom canvas { display: block; margin: 24px auto; box-shadow: 0 10px 40px rgba(0, 0, 0, .6); }
+  #zoom .cap { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: 12px;
+    background: var(--panel); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); }
+  .error { margin: 20px; padding: 12px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Materiais procedurais</h1>
+  <p>Cada textura (512×512) repetida 3×3 — procure emendas nas bordas. Clique para ampliar em 1:1.</p>
+  <label><input type="checkbox" id="outline"> destacar a textura central</label>
+  <span id="summary"></span>
+</header>
+<main id="grid"></main>
+<div id="zoom" role="dialog" aria-label="Textura ampliada"><span class="cap" id="zoom-cap"></span><canvas id="zoom-canvas"></canvas></div>
+
+<script>window.DD = {};</script>
+<script src="../src/10-materials.js"></script>
+<script>
+(function () {
+  'use strict';
+  const M = window.DD.materials;
+  const grid = document.getElementById('grid');
+  if (!M) {
+    grid.outerHTML = '<p class="error">Não foi possível carregar src/10-materials.js.</p>';
+    return;
+  }
+  const SIZE = M.SIZE;
+  const VIEW = 480; // backing pixels of each 3×3 card
+
+  function drawTiled(target, src, copies, outline) {
+    const ctx = target.getContext('2d');
+    const cell = target.width / copies;
+    ctx.imageSmoothingQuality = 'high';
+    for (let j = 0; j < copies; j++)
+      for (let i = 0; i < copies; i++) ctx.drawImage(src, 0, 0, SIZE, SIZE, i * cell, j * cell, cell, cell);
+    if (outline) {
+      ctx.strokeStyle = '#E0703F';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(cell, cell, cell, cell);
+    }
+  }
+
+  function card(entry) {
+    const t0 = performance.now();
+    const src = M.canvas(entry.id);
+    const ms = performance.now() - t0;
+    const el = document.createElement('article');
+    el.className = 'card';
+    const view = document.createElement('canvas');
+    view.width = view.height = VIEW;
+    view.title = 'Ampliar ' + entry.name;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.innerHTML =
+      '<h2></h2><span class="num"></span>' +
+      '<div class="spec"><span class="chip"></span><span class="id"></span><span class="num tile"></span></div>' +
+      '<span class="desc"></span><div class="swatches"></div>';
+    meta.querySelector('h2').textContent = entry.name;
+    const time = meta.querySelector('.num');
+    time.textContent = ms.toFixed(1) + ' ms';
+    if (ms > 40) time.classList.add('slow');
+    meta.querySelector('.id').textContent = entry.id + ' · ' + entry.group;
+    meta.querySelector('.tile').textContent = 'tileMM ' + entry.tileMM + ' · ' + entry.base;
+    meta.querySelector('.chip').style.background = entry.base;
+    meta.querySelector('.desc').textContent = entry.desc || '';
+    if (entry.site) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = 'terreno';
+      meta.querySelector('h2').append(' ', tag);
+    }
+    [64, 32].forEach((px) => {
+      const img = new Image(px, px);
+      img.alt = 'Amostra ' + px + ' px';
+      img.src = M.swatch(entry.id, px);
+      meta.querySelector('.swatches').append(img);
+    });
+    el.append(view, meta);
+    view.addEventListener('click', () => openZoom(entry, src));
+    return { el, view, src, ms };
+  }
+
+  function openZoom(entry, src) {
+    const c = document.getElementById('zoom-canvas');
+    c.width = c.height = SIZE * 3;
+    c.style.width = c.style.height = SIZE * 3 / devicePixelRatio + 'px';
+    drawTiled(c, src, 3, document.getElementById('outline').checked);
+    document.getElementById('zoom-cap').textContent = entry.name + ' — 3×3 em 1:1 (' + (entry.tileMM * 3 / 1000).toFixed(2).replace('.', ',') + ' m)';
+    document.getElementById('zoom').classList.add('open');
+  }
+  document.getElementById('zoom').addEventListener('click', () => document.getElementById('zoom').classList.remove('open'));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') document.getElementById('zoom').classList.remove('open');
+  });
+
+  const cards = [];
+  let total = 0;
+  M.list.forEach((entry) => {
+    try {
+      const c = card(entry);
+      cards.push(c);
+      total += c.ms;
+      grid.append(c.el);
+    } catch (err) {
+      const p = document.createElement('p');
+      p.className = 'error';
+      p.textContent = entry.id + ': ' + (err && err.message ? err.message : err);
+      grid.append(p);
+    }
+  });
+  const redraw = () => cards.forEach((c) => drawTiled(c.view, c.src, 3, document.getElementById('outline').checked));
+  document.getElementById('outline').addEventListener('change', redraw);
+  redraw();
+  document.getElementById('summary').textContent =
+    M.list.length + ' materiais · geração total ' + total.toFixed(0) + ' ms · máx ' + Math.max(...cards.map((c) => c.ms)).toFixed(1) + ' ms';
+})();
+</script>
+</body>
+</html>

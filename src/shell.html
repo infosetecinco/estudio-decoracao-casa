@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Estúdio de Decoração — Casa</title>
+<meta name="description" content="Ferramenta de decoração em 2D e 3D sobre a planta aprovada de uma casa (3 pavimentos, lote 9 × 20 m).">
+<meta name="color-scheme" content="dark light">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<style>/*__CSS__*/</style>
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- ============================================================ top bar -->
+  <header class="topbar" role="banner">
+    <button type="button" class="icon-btn only-narrow hide-compact" id="btn-drawer-lib" aria-label="Biblioteca de móveis" aria-controls="library" aria-expanded="false" data-tip="Biblioteca de móveis"><span class="ic" data-icon="library"></span></button>
+
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true" focusable="false">
+        <rect x="0.5" y="0.5" width="27" height="27" rx="7" fill="#E0703F"/>
+        <path d="M6.5 13.2 14 7l7.5 6.2V21H6.5z" fill="none" stroke="#1C0F08" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M11.8 21v-4.6h4.4V21" fill="none" stroke="#1C0F08" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M4 24h20" stroke="#1C0F08" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="1.6 1.6"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-title">Estúdio de Decoração</span>
+        <span class="brand-project" id="project-name">Casa — projeto aprovado</span>
+      </div>
+    </div>
+
+    <span class="topbar-sep" aria-hidden="true"></span>
+    <nav class="floor-tabs" id="floor-tabs" role="tablist" aria-label="Pavimentos"></nav>
+
+    <span class="topbar-spacer"></span>
+
+    <div class="seg view-toggle" id="view-toggle" role="group" aria-label="Modo de visualização">
+      <button type="button" data-view="2d" aria-pressed="true" data-tip="Planta 2D" data-key="Q"><span class="seg-dot" aria-hidden="true"></span><span>2D</span></button>
+      <button type="button" class="seg-split" data-view="split" aria-pressed="false" data-tip="2D e 3D lado a lado" data-key="Shift+Q"><span class="seg-dot" aria-hidden="true"></span><span class="seg-long">Dividido</span><span class="seg-short" aria-hidden="true">2D|3D</span></button>
+      <button type="button" data-view="3d" aria-pressed="false" data-tip="Vista 3D" data-key="Q"><span class="seg-dot" aria-hidden="true"></span><span>3D</span></button>
+    </div>
+
+    <span class="topbar-spacer"></span>
+
+    <div class="topbar-actions">
+      <button type="button" class="icon-btn" id="btn-undo" aria-label="Desfazer" data-tip="Nada para desfazer" disabled><span class="ic" data-icon="undo"></span></button>
+      <button type="button" class="icon-btn hide-compact" id="btn-redo" aria-label="Refazer" data-tip="Nada para refazer" disabled><span class="ic" data-icon="redo"></span></button>
+      <span class="topbar-sep" aria-hidden="true"></span>
+      <button type="button" class="btn btn-primary btn-save" id="btn-save" data-tip="Salvar neste navegador" data-key="Ctrl+S" aria-label="Salvar"><span class="ic" data-icon="save"></span><span class="btn-save-label">Salvar</span></button>
+
+      <div class="menu-wrap">
+        <button type="button" class="btn btn-ghost hide-compact" id="btn-export" aria-haspopup="menu" aria-expanded="false" aria-controls="menu-export"><span class="ic" data-icon="export"></span><span>Exportar</span><span class="ic ic-sm" data-icon="chevron"></span></button>
+        <div class="menu" id="menu-export" role="menu" aria-label="Exportar" hidden>
+          <button type="button" class="menu-item" role="menuitem" data-action="export-plan"><span class="ic" data-icon="image"></span><span>Planta PNG</span><span class="menu-meta">pavimento atual</span></button>
+          <button type="button" class="menu-item" role="menuitem" data-action="export-3d"><span class="ic" data-icon="cube"></span><span>Vista 3D PNG</span><span class="menu-meta">câmera atual</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" class="menu-item" role="menuitem" data-action="export-json"><span class="ic" data-icon="file"></span><span>Projeto .json</span><span class="menu-meta">backup</span></button>
+        </div>
+      </div>
+
+      <div class="menu-wrap">
+        <button type="button" class="icon-btn" id="btn-more" aria-label="Mais opções" aria-haspopup="menu" aria-expanded="false" aria-controls="menu-more" data-tip="Mais opções"><span class="ic" data-icon="more"></span></button>
+        <div class="menu" id="menu-more" role="menu" aria-label="Mais opções" hidden>
+          <button type="button" class="menu-item only-compact-item" role="menuitem" data-action="redo"><span class="ic" data-icon="redo"></span><span>Refazer</span></button>
+          <div class="menu-sep only-compact-item" role="separator"></div>
+          <button type="button" class="menu-item only-compact-item" role="menuitem" data-action="export-plan"><span class="ic" data-icon="image"></span><span>Exportar planta PNG</span></button>
+          <button type="button" class="menu-item only-compact-item" role="menuitem" data-action="export-3d"><span class="ic" data-icon="cube"></span><span>Exportar vista 3D PNG</span></button>
+          <button type="button" class="menu-item only-compact-item" role="menuitem" data-action="export-json"><span class="ic" data-icon="file"></span><span>Exportar projeto .json</span></button>
+          <div class="menu-sep only-compact-item" role="separator"></div>
+          <button type="button" class="menu-item" role="menuitem" data-action="import"><span class="ic" data-icon="upload"></span><span>Importar .json</span></button>
+          <button type="button" class="menu-item" role="menuitem" data-action="reset"><span class="ic" data-icon="reset"></span><span>Restaurar projeto original</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" class="menu-item" role="menuitem" data-action="theme"><span class="ic" data-icon="theme"></span><span id="theme-label">Tema claro</span></button>
+          <button type="button" class="menu-item" role="menuitem" data-action="shortcuts"><span class="ic" data-icon="keyboard"></span><span>Atalhos</span><span class="menu-meta">?</span></button>
+        </div>
+      </div>
+
+      <button type="button" class="icon-btn only-narrow" id="btn-drawer-insp" aria-label="Inspetor" aria-controls="inspector" aria-expanded="false" data-tip="Inspetor"><span class="ic" data-icon="inspector"></span><span class="dot" hidden></span></button>
+    </div>
+  </header>
+
+  <!-- ============================================================ workspace -->
+  <div class="workspace" id="workspace">
+    <nav class="toolrail" id="toolrail" aria-label="Ferramentas"></nav>
+
+    <aside class="library" id="library" aria-labelledby="library-title">
+      <div class="panel-head">
+        <h2 class="panel-title" id="library-title">Biblioteca de móveis</h2>
+        <span class="panel-count num" id="lib-count"></span>
+        <button type="button" class="icon-btn only-narrow" data-close-drawer aria-label="Fechar biblioteca"><span class="ic" data-icon="close"></span></button>
+      </div>
+      <div class="lib-tools">
+        <label class="search">
+          <span class="ic" data-icon="search"></span>
+          <span class="sr-only">Buscar móveis</span>
+          <input type="search" id="lib-search" placeholder="Buscar móveis…" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="chips" id="lib-chips" role="group" aria-label="Categorias"></div>
+      </div>
+      <div class="lib-grid" id="lib-grid" role="list"></div>
+      <div class="lib-foot">Arraste para a planta ou clique para adicionar</div>
+    </aside>
+
+    <main class="stage" id="stage" data-view="2d">
+      <section class="view" id="view2d" aria-label="Planta 2D">
+        <canvas id="plan-canvas" aria-label="Planta do pavimento" role="img"></canvas>
+        <div class="drop-hint" aria-hidden="true">Solte para posicionar o móvel</div>
+        <div class="paint-strip float" id="paint-strip" role="toolbar" aria-label="Revestimento de piso" hidden></div>
+      </section>
+      <div class="split-divider" id="split-divider" role="separator" aria-orientation="vertical" aria-label="Redimensionar vistas 2D e 3D" aria-valuemin="20" aria-valuemax="80" aria-valuenow="50" tabindex="-1"></div>
+      <section class="view" id="view3d" aria-label="Vista 3D">
+        <div id="view3d-overlay"></div>
+      </section>
+    </main>
+
+    <aside class="inspector" id="inspector" aria-labelledby="inspector-title">
+      <div class="panel-head">
+        <h2 class="panel-title" id="inspector-title">Projeto</h2>
+        <span class="panel-count" id="inspector-kind"></span>
+        <button type="button" class="icon-btn" id="btn-clear-selection" aria-label="Limpar seleção" data-tip="Limpar seleção" data-key="Esc" hidden><span class="ic" data-icon="close"></span></button>
+        <button type="button" class="icon-btn only-narrow" data-close-drawer aria-label="Fechar inspetor"><span class="ic" data-icon="chevronRight"></span></button>
+      </div>
+      <div class="inspector-body" id="inspector-body" aria-live="off"></div>
+    </aside>
+
+    <div class="scrim" id="scrim" hidden></div>
+  </div>
+
+  <!-- ============================================================ status bar -->
+  <footer class="statusbar" id="statusbar">
+    <div class="status-group status-grow">
+      <span class="status-tool" id="status-tool"></span>
+      <span class="status-hint status-optional" id="status-hint"></span>
+    </div>
+    <div class="status-group">
+      <span class="status-coords num" id="status-coords" aria-label="Posição do cursor">x —  · y —</span>
+    </div>
+    <div class="status-group status-optional">
+      <button type="button" class="icon-btn" id="btn-zoom-out" aria-label="Diminuir zoom" data-tip="Diminuir zoom" data-key="−" data-tip-pos="top"><span class="ic" data-icon="minus"></span></button>
+      <span class="status-zoom num" id="status-zoom" title="Zoom relativo à escala 1:100">—</span>
+      <button type="button" class="icon-btn" id="btn-zoom-in" aria-label="Aumentar zoom" data-tip="Aumentar zoom" data-key="+" data-tip-pos="top"><span class="ic" data-icon="plus"></span></button>
+      <button type="button" class="icon-btn" id="btn-fit" aria-label="Enquadrar pavimento" data-tip="Enquadrar pavimento" data-key="0" data-tip-pos="top"><span class="ic" data-icon="fit"></span></button>
+    </div>
+    <div class="status-group status-optional" role="group" aria-label="Exibição">
+      <button type="button" class="chip" id="tg-snap" aria-pressed="true" data-tip="Móveis aderem às paredes (Alt desliga durante o arraste)" data-tip-pos="top"><span class="ic" data-icon="magnet"></span>Adsorção</button>
+      <button type="button" class="chip" id="tg-grid" aria-pressed="true" data-tip="Grade" data-key="G" data-tip-pos="top"><span class="ic" data-icon="grid"></span>Grade</button>
+      <button type="button" class="chip" id="tg-dims" aria-pressed="true" data-tip="Cotas automáticas" data-tip-pos="top"><span class="ic" data-icon="dims"></span>Cotas</button>
+      <button type="button" class="chip" id="tg-labels" aria-pressed="true" data-tip="Nomes e áreas dos ambientes" data-tip-pos="top"><span class="ic" data-icon="tag"></span>Rótulos</button>
+    </div>
+    <div class="status-group">
+      <span class="save-state" id="save-state" data-state="idle" role="status"><span class="save-dot" aria-hidden="true"></span><span id="save-text">Autossalvamento ativo</span></span>
+    </div>
+  </footer>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+<!-- ============================================================ dialogs -->
+<dialog class="dialog" id="dlg-shortcuts" aria-labelledby="dlg-shortcuts-title">
+  <div class="dialog-head">
+    <span class="ic" data-icon="keyboard"></span>
+    <h2 id="dlg-shortcuts-title">Atalhos de teclado</h2>
+    <button type="button" class="icon-btn" data-dialog-close aria-label="Fechar"><span class="ic" data-icon="close"></span></button>
+  </div>
+  <div class="dialog-body"><div class="shortcut-groups" id="shortcut-groups"></div></div>
+</dialog>
+
+<dialog class="dialog dialog-sm" id="dlg-confirm" aria-labelledby="dlg-confirm-title" aria-describedby="dlg-confirm-body">
+  <div class="dialog-head">
+    <span class="ic" data-icon="warn"></span>
+    <h2 id="dlg-confirm-title">Confirmar</h2>
+  </div>
+  <div class="dialog-body"><p id="dlg-confirm-body"></p></div>
+  <div class="dialog-foot">
+    <button type="button" class="btn btn-ghost" data-dialog-cancel>Cancelar</button>
+    <button type="button" class="btn btn-danger" data-dialog-confirm>Confirmar</button>
+  </div>
+</dialog>
+
+<input type="file" id="file-import" accept=".json,application/json" hidden>
+
+<script>//__JS__</script>
+</body>
+</html>
